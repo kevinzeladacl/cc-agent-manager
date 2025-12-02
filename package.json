@@ -1,0 +1,218 @@
+{
+  "name": "cc-agent-manager",
+  "displayName": "CC-Agent Manager",
+  "description": "Manage Claude Code agents and commands from the VS Code sidebar",
+  "version": "1.0.0",
+  "publisher": "kevinzeladacl",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kevinzeladacl/cc-agent-manager.git"
+  },
+  "homepage": "https://github.com/kevinzeladacl/cc-agent-manager#readme",
+  "bugs": {
+    "url": "https://github.com/kevinzeladacl/cc-agent-manager/issues"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "kevinzeladacl",
+    "url": "https://github.com/kevinzeladacl"
+  },
+  "icon": "icon.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "workspaceContains:.claude"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claude-code-manager",
+          "title": "Claude Code",
+          "icon": "icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claude-code-manager": [
+        {
+          "id": "claudeAgents",
+          "name": "Agents",
+          "contextualTitle": "Claude Agents"
+        },
+        {
+          "id": "claudeCommands",
+          "name": "Commands",
+          "contextualTitle": "Claude Commands"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claudeCodeManager.openAgent",
+        "title": "Open Agent",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "claudeCodeManager.openCommand",
+        "title": "Open Command",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "claudeCodeManager.createAgent",
+        "title": "Create New Agent",
+        "icon": "$(add)"
+      },
+      {
+        "command": "claudeCodeManager.createCommand",
+        "title": "Create New Command",
+        "icon": "$(add)"
+      },
+      {
+        "command": "claudeCodeManager.deleteItem",
+        "title": "Delete",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "claudeCodeManager.refresh",
+        "title": "Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claudeCodeManager.enableItem",
+        "title": "Enable",
+        "icon": "$(check)"
+      },
+      {
+        "command": "claudeCodeManager.disableItem",
+        "title": "Disable",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "claudeCodeManager.autoContext",
+        "title": "Auto Context",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "claudeCodeManager.updateAgentContext",
+        "title": "Update Context",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "claudeCodeManager.changeModel",
+        "title": "Change Model",
+        "icon": "$(symbol-enum)"
+      }
+    ],
+    "configuration": {
+      "title": "CC-Agent Manager",
+      "properties": {
+        "ccAgentManager.skipPermissionPrompts": {
+          "type": "boolean",
+          "default": false,
+          "description": "Skip Claude Code permission prompts when generating auto-context. Required for non-interactive execution."
+        },
+        "ccAgentManager.skipPermissionPromptsAsked": {
+          "type": "boolean",
+          "default": false,
+          "description": "Internal: Whether the user has been asked about skip permissions."
+        }
+      }
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "claudeCodeManager.autoContext",
+          "when": "view == claudeAgents",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeCodeManager.createAgent",
+          "when": "view == claudeAgents",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudeCodeManager.createCommand",
+          "when": "view == claudeCommands",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeCodeManager.refresh",
+          "when": "view == claudeAgents || view == claudeCommands",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "claudeCodeManager.openAgent",
+          "when": "view == claudeAgents && (viewItem == agent-enabled || viewItem == agent-disabled)",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudeCodeManager.openCommand",
+          "when": "view == claudeCommands && (viewItem == command-enabled || viewItem == command-disabled)",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudeCodeManager.changeModel",
+          "when": "view == claudeAgents && (viewItem == agent-enabled || viewItem == agent-disabled)",
+          "group": "inline@2"
+        },
+        {
+          "command": "claudeCodeManager.enableItem",
+          "when": "viewItem == agent-disabled || viewItem == command-disabled",
+          "group": "inline@3"
+        },
+        {
+          "command": "claudeCodeManager.disableItem",
+          "when": "viewItem == agent-enabled || viewItem == command-enabled",
+          "group": "inline@3"
+        },
+        {
+          "command": "claudeCodeManager.changeModel",
+          "when": "view == claudeAgents && (viewItem == agent-enabled || viewItem == agent-disabled)",
+          "group": "1_model"
+        },
+        {
+          "command": "claudeCodeManager.updateAgentContext",
+          "when": "view == claudeAgents && (viewItem == agent-enabled || viewItem == agent-disabled)",
+          "group": "2_context"
+        },
+        {
+          "command": "claudeCodeManager.enableItem",
+          "when": "viewItem == agent-disabled || viewItem == command-disabled",
+          "group": "3_state"
+        },
+        {
+          "command": "claudeCodeManager.disableItem",
+          "when": "viewItem == agent-enabled || viewItem == command-enabled",
+          "group": "3_state"
+        },
+        {
+          "command": "claudeCodeManager.deleteItem",
+          "when": "viewItem == agent-enabled || viewItem == agent-disabled || viewItem == command-enabled || viewItem == command-disabled",
+          "group": "4_danger"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "typescript": "^5.3.0"
+  }
+}
