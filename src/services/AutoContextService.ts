@@ -24,6 +24,20 @@ export interface AgentSuggestion {
     template: string;
 }
 
+export interface CommandSuggestion {
+    name: string;
+    description: string;
+    reason: string;
+    template: string;
+}
+
+export interface SkillSuggestion {
+    name: string;
+    description: string;
+    reason: string;
+    template: string;
+}
+
 export class AutoContextService {
     private claudeService: ClaudeCodeService;
     private useClaudeCode: boolean = true;
@@ -462,6 +476,164 @@ You are an architecture expert for the ${projectName} project.
 - Respect existing patterns unless there's good reason to change
 - Document architectural decisions
 `;
+    }
+
+    /**
+     * Suggest commands using Claude Code AI or fallback to static analysis
+     */
+    async suggestCommandsWithAI(files: MarkdownFile[]): Promise<CommandSuggestion[]> {
+        if (!this.useClaudeCode) {
+            return this.suggestCommands(files);
+        }
+
+        try {
+            const response = await this.claudeService.analyzeProjectForCommands();
+            if (!response.success) {
+                return this.suggestCommands(files);
+            }
+
+            const parsed = JSON.parse(response.content);
+            const suggestions: CommandSuggestion[] = [];
+
+            for (const item of parsed) {
+                const instructions = Array.isArray(item.instructions)
+                    ? item.instructions.map((s: string, i: number) => `${i + 1}. ${s}`).join('\n')
+                    : item.instructions || '';
+
+                suggestions.push({
+                    name: item.name,
+                    description: item.description,
+                    reason: item.reason,
+                    template: `---\ndescription: ${item.description}\n---\n\n# ${item.name} Command\n\n${item.description}\n\n## Instructions\n\nWhen invoked, you should:\n\n${instructions}\n\n## Arguments\n\nUse $ARGUMENTS to access all arguments passed to this command.\n`
+                });
+            }
+            return suggestions;
+        } catch {
+            return this.suggestCommands(files);
+        }
+    }
+
+    /**
+     * Static fallback: suggest commands based on project analysis
+     */
+    suggestCommands(files: MarkdownFile[]): CommandSuggestion[] {
+        const suggestions: CommandSuggestion[] = [];
+        const contentLower = files.map(f => f.content.toLowerCase()).join(' ');
+
+        if (contentLower.includes('test') || contentLower.includes('jest') || contentLower.includes('pytest')) {
+            suggestions.push({
+                name: 'run-tests',
+                description: 'Run project tests with coverage',
+                reason: 'Found testing-related documentation',
+                template: `---\ndescription: Run project tests with coverage\n---\n\n# run-tests Command\n\nRun the project test suite.\n\n## Instructions\n\n1. Detect the test framework used\n2. Run all tests with coverage enabled\n3. Report any failures with context\n`
+            });
+        }
+
+        if (contentLower.includes('lint') || contentLower.includes('eslint') || contentLower.includes('prettier')) {
+            suggestions.push({
+                name: 'lint-fix',
+                description: 'Run linter and auto-fix issues',
+                reason: 'Found linting-related documentation',
+                template: `---\ndescription: Run linter and auto-fix issues\n---\n\n# lint-fix Command\n\nRun the project linter and fix all auto-fixable issues.\n\n## Instructions\n\n1. Detect the linter configuration\n2. Run the linter with --fix flag\n3. Report remaining issues that need manual fixing\n`
+            });
+        }
+
+        if (contentLower.includes('deploy') || contentLower.includes('docker') || contentLower.includes('ci/cd')) {
+            suggestions.push({
+                name: 'deploy-check',
+                description: 'Pre-deployment checklist verification',
+                reason: 'Found deployment-related documentation',
+                template: `---\ndescription: Pre-deployment checklist verification\n---\n\n# deploy-check Command\n\nVerify the project is ready for deployment.\n\n## Instructions\n\n1. Run all tests\n2. Check for uncommitted changes\n3. Verify build succeeds\n4. Report deployment readiness\n`
+            });
+        }
+
+        if (contentLower.includes('api') || contentLower.includes('endpoint') || contentLower.includes('route')) {
+            suggestions.push({
+                name: 'list-endpoints',
+                description: 'List all API endpoints in the project',
+                reason: 'Found API-related documentation',
+                template: `---\ndescription: List all API endpoints in the project\n---\n\n# list-endpoints Command\n\nScan and list all API endpoints.\n\n## Instructions\n\n1. Search for route/endpoint definitions\n2. List each endpoint with method, path, and handler\n3. Group by resource or module\n`
+            });
+        }
+
+        return suggestions;
+    }
+
+    /**
+     * Suggest skills using Claude Code AI or fallback to static analysis
+     */
+    async suggestSkillsWithAI(files: MarkdownFile[]): Promise<SkillSuggestion[]> {
+        if (!this.useClaudeCode) {
+            return this.suggestSkills(files);
+        }
+
+        try {
+            const response = await this.claudeService.analyzeProjectForSkills();
+            if (!response.success) {
+                return this.suggestSkills(files);
+            }
+
+            const parsed = JSON.parse(response.content);
+            const suggestions: SkillSuggestion[] = [];
+
+            for (const item of parsed) {
+                suggestions.push({
+                    name: item.name,
+                    description: item.description,
+                    reason: item.reason,
+                    template: `---\nname: ${item.name}\ndescription: ${item.description}\nargument-hint: "[args]"\nuser-invocable: true\nmodel: sonnet\n---\n\n${item.instructions || `Instructions for ${item.name}...`}\n`
+                });
+            }
+            return suggestions;
+        } catch {
+            return this.suggestSkills(files);
+        }
+    }
+
+    /**
+     * Static fallback: suggest skills based on project analysis
+     */
+    suggestSkills(files: MarkdownFile[]): SkillSuggestion[] {
+        const suggestions: SkillSuggestion[] = [];
+        const contentLower = files.map(f => f.content.toLowerCase()).join(' ');
+
+        if (contentLower.includes('test') || contentLower.includes('spec')) {
+            suggestions.push({
+                name: 'write-test',
+                description: 'Generate tests for a given file or function',
+                reason: 'Found testing-related documentation',
+                template: `---\nname: write-test\ndescription: Generate tests for a given file or function\nargument-hint: "<file-or-function>"\nuser-invocable: true\nmodel: sonnet\n---\n\nGenerate comprehensive tests for the specified file or function.\n\n## Instructions\n\n1. Read the target file/function\n2. Identify edge cases and happy paths\n3. Write tests following the project's existing test patterns\n4. Include both positive and negative test cases\n`
+            });
+        }
+
+        if (contentLower.includes('component') || contentLower.includes('react') || contentLower.includes('vue') || contentLower.includes('angular')) {
+            suggestions.push({
+                name: 'add-component',
+                description: 'Scaffold a new UI component',
+                reason: 'Found frontend framework documentation',
+                template: `---\nname: add-component\ndescription: Scaffold a new UI component\nargument-hint: "<component-name>"\nuser-invocable: true\nmodel: sonnet\n---\n\nCreate a new UI component following the project's conventions.\n\n## Instructions\n\n1. Identify the component directory pattern\n2. Create the component file with proper imports\n3. Add styles if the project uses CSS modules/styled-components\n4. Create a basic test file\n`
+            });
+        }
+
+        if (contentLower.includes('api') || contentLower.includes('endpoint') || contentLower.includes('route')) {
+            suggestions.push({
+                name: 'add-endpoint',
+                description: 'Add a new API endpoint with boilerplate',
+                reason: 'Found API-related documentation',
+                template: `---\nname: add-endpoint\ndescription: Add a new API endpoint with boilerplate\nargument-hint: "<method> <path>"\nuser-invocable: true\nmodel: sonnet\n---\n\nCreate a new API endpoint following the project's patterns.\n\n## Instructions\n\n1. Identify the routing pattern used\n2. Create the handler with proper request/response types\n3. Add input validation\n4. Add the route to the router\n`
+            });
+        }
+
+        if (contentLower.includes('review') || contentLower.includes('pull request') || contentLower.includes('pr')) {
+            suggestions.push({
+                name: 'review-code',
+                description: 'Review code changes for issues and improvements',
+                reason: 'Found code review documentation',
+                template: `---\nname: review-code\ndescription: Review code changes for issues and improvements\nargument-hint: "[file-or-diff]"\nuser-invocable: true\nmodel: sonnet\n---\n\nReview the specified code changes or files.\n\n## Instructions\n\n1. Read the changes or file\n2. Check for bugs, security issues, and performance problems\n3. Verify adherence to project conventions\n4. Suggest improvements with explanations\n`
+            });
+        }
+
+        return suggestions;
     }
 
     generateContextSection(files: MarkdownFile[]): string {

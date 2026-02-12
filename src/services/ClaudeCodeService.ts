@@ -406,6 +406,62 @@ Start with "## Project Context (Auto-generated)"`;
     }
 
     /**
+     * Analyze project and suggest commands using Claude
+     */
+    async analyzeProjectForCommands(): Promise<ClaudeResponse> {
+        const projectContext = this.getProjectContext();
+
+        const prompt = `You are analyzing a software project to suggest Claude Code slash commands (invoked with /).
+
+PROJECT CONTEXT:
+${projectContext}
+
+Suggest 2-4 useful slash commands for this project's daily workflow.
+Commands are shortcuts that users invoke with /command-name. They should automate repetitive tasks.
+
+Examples of good commands: /deploy, /lint-fix, /generate-types, /db-migrate, /run-tests
+
+For each command provide:
+1. name: kebab-case (e.g., "run-tests", "deploy-staging")
+2. description: One line about what this command does
+3. reason: Why this command saves time for THIS project
+4. instructions: 3-5 step instructions the command should follow
+
+Format as JSON array ONLY (no markdown, no explanation):
+[{"name": "...", "description": "...", "reason": "...", "instructions": ["step1", "step2"]}]`;
+
+        return this.execute(prompt, { timeout: 60000 });
+    }
+
+    /**
+     * Analyze project and suggest skills using Claude
+     */
+    async analyzeProjectForSkills(): Promise<ClaudeResponse> {
+        const projectContext = this.getProjectContext();
+
+        const prompt = `You are analyzing a software project to suggest Claude Code skills.
+Skills are reusable prompt templates users invoke with /skill-name. They are directory-based with SKILL.md files.
+
+PROJECT CONTEXT:
+${projectContext}
+
+Suggest 2-4 useful skills for this project. Skills should be reusable actions that benefit from project context.
+
+Examples: /review-pr, /write-test, /add-endpoint, /refactor-component
+
+For each skill provide:
+1. name: kebab-case (e.g., "write-test", "add-endpoint")
+2. description: One line about what this skill does
+3. reason: Why this skill is valuable for THIS project
+4. instructions: The detailed prompt instructions for the skill
+
+Format as JSON array ONLY (no markdown, no explanation):
+[{"name": "...", "description": "...", "reason": "...", "instructions": "..."}]`;
+
+        return this.execute(prompt, { timeout: 60000 });
+    }
+
+    /**
      * Update an existing agent with better context
      */
     async enhanceAgentPrompt(currentPrompt: string, projectContextSummary: string): Promise<ClaudeResponse> {

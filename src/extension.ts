@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import { ClaudeTreeProvider, ClaudeItemNode } from './providers/ClaudeTreeProvider';
 import { MetricsTreeProvider } from './providers/MetricsTreeProvider';
 import { MetricsDashboard } from './webview/MetricsDashboard';
-import { AutoContextService, AgentSuggestion } from './services/AutoContextService';
+import { AutoContextService, AgentSuggestion, CommandSuggestion, SkillSuggestion } from './services/AutoContextService';
 
 let agentsProvider: ClaudeTreeProvider;
 let commandsProvider: ClaudeTreeProvider;
@@ -139,6 +139,14 @@ export function activate(context: vscode.ExtensionContext) {
                 metricsDashboard = new MetricsDashboard(workspaceRoot);
             }
             metricsDashboard.show();
+        }),
+
+        vscode.commands.registerCommand('claudeCodeManager.suggestCommands', async () => {
+            await runSuggestCommands(workspaceRoot);
+        }),
+
+        vscode.commands.registerCommand('claudeCodeManager.suggestSkills', async () => {
+            await runSuggestSkills(workspaceRoot);
         })
     );
 
@@ -432,6 +440,178 @@ async function showAgentSuggestions(suggestions: AgentSuggestion[], workspaceRoo
 
     if (skippedAgents.length > 0 && createdAgents.length === 0) {
         vscode.window.showInformationMessage('No agents were created.');
+    }
+}
+
+async function runSuggestCommands(workspaceRoot: string | undefined) {
+    if (!workspaceRoot) {
+        vscode.window.showErrorMessage('No workspace folder open. Please open a folder first.');
+        return;
+    }
+
+    const autoContext = new AutoContextService(workspaceRoot);
+
+    await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: 'Suggest Commands',
+        cancellable: false
+    }, async (progress) => {
+        progress.report({ message: 'Checking Claude Code CLI...' });
+        const claudeAvailable = await autoContext.checkClaudeAvailability();
+
+        if (claudeAvailable) {
+            const skipPermissions = await ensureSkipPermissionsAccepted();
+            autoContext.setSkipPermissions(skipPermissions);
+        }
+
+        progress.report({ message: 'Scanning project files...' });
+        const files = await autoContext.scanMarkdownFiles();
+
+        progress.report({ message: claudeAvailable ? 'Claude Code is analyzing project...' : 'Analyzing project...' });
+        const suggestions = claudeAvailable
+            ? await autoContext.suggestCommandsWithAI(files)
+            : autoContext.suggestCommands(files);
+
+        await showCommandSuggestions(suggestions, workspaceRoot);
+    });
+
+    commandsProvider.refresh();
+}
+
+async function showCommandSuggestions(suggestions: CommandSuggestion[], workspaceRoot: string) {
+    if (suggestions.length === 0) {
+        vscode.window.showInformationMessage('No command suggestions based on project analysis.');
+        return;
+    }
+
+    const items = suggestions.map(s => ({
+        label: `$(terminal) ${s.name}`,
+        description: s.description,
+        detail: s.reason,
+        suggestion: s
+    }));
+
+    const selected = await vscode.window.showQuickPick(items, {
+        canPickMany: true,
+        placeHolder: 'Select commands to create'
+    });
+
+    if (!selected || selected.length === 0) return;
+
+    const commandsDir = path.join(workspaceRoot, '.claude', 'commands');
+    if (!fs.existsSync(commandsDir)) {
+        fs.mkdirSync(commandsDir, { recursive: true });
+    }
+
+    const created: string[] = [];
+
+    for (const item of selected) {
+        const filePath = path.join(commandsDir, `${item.suggestion.name}.md`);
+
+        if (fs.existsSync(filePath)) {
+            const overwrite = await vscode.window.showWarningMessage(
+                `Command "${item.suggestion.name}" already exists. Overwrite?`,
+                'Yes', 'No'
+            );
+            if (overwrite !== 'Yes') continue;
+        }
+
+        const uri = vscode.Uri.file(filePath);
+        await vscode.workspace.fs.writeFile(uri, Buffer.from(item.suggestion.template));
+        created.push(item.suggestion.name);
+    }
+
+    if (created.length > 0) {
+        vscode.window.showInformationMessage(`Created ${created.length} command(s): ${created.join(', ')}`);
+        commandsProvider.refresh();
+        openFile(path.join(commandsDir, `${created[0]}.md`));
+    }
+}
+
+async function runSuggestSkills(workspaceRoot: string | undefined) {
+    if (!workspaceRoot) {
+        vscode.window.showErrorMessage('No workspace folder open. Please open a folder first.');
+        return;
+    }
+
+    const autoContext = new AutoContextService(workspaceRoot);
+
+    await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: 'Suggest Skills',
+        cancellable: false
+    }, async (progress) => {
+        progress.report({ message: 'Checking Claude Code CLI...' });
+        const claudeAvailable = await autoContext.checkClaudeAvailability();
+
+        if (claudeAvailable) {
+            const skipPermissions = await ensureSkipPermissionsAccepted();
+            autoContext.setSkipPermissions(skipPermissions);
+        }
+
+        progress.report({ message: 'Scanning project files...' });
+        const files = await autoContext.scanMarkdownFiles();
+
+        progress.report({ message: claudeAvailable ? 'Claude Code is analyzing project...' : 'Analyzing project...' });
+        const suggestions = claudeAvailable
+            ? await autoContext.suggestSkillsWithAI(files)
+            : autoContext.suggestSkills(files);
+
+        await showSkillSuggestions(suggestions, workspaceRoot);
+    });
+
+    skillsProvider.refresh();
+}
+
+async function showSkillSuggestions(suggestions: SkillSuggestion[], workspaceRoot: string) {
+    if (suggestions.length === 0) {
+        vscode.window.showInformationMessage('No skill suggestions based on project analysis.');
+        return;
+    }
+
+    const items = suggestions.map(s => ({
+        label: `$(symbol-method) ${s.name}`,
+        description: s.description,
+        detail: s.reason,
+        suggestion: s
+    }));
+
+    const selected = await vscode.window.showQuickPick(items, {
+        canPickMany: true,
+        placeHolder: 'Select skills to create'
+    });
+
+    if (!selected || selected.length === 0) return;
+
+    const skillsBase = path.join(workspaceRoot, '.claude', 'skills');
+    if (!fs.existsSync(skillsBase)) {
+        fs.mkdirSync(skillsBase, { recursive: true });
+    }
+
+    const created: string[] = [];
+
+    for (const item of selected) {
+        const skillDir = path.join(skillsBase, item.suggestion.name);
+        const filePath = path.join(skillDir, 'SKILL.md');
+
+        if (fs.existsSync(skillDir)) {
+            const overwrite = await vscode.window.showWarningMessage(
+                `Skill "${item.suggestion.name}" already exists. Overwrite?`,
+                'Yes', 'No'
+            );
+            if (overwrite !== 'Yes') continue;
+        }
+
+        fs.mkdirSync(skillDir, { recursive: true });
+        const uri = vscode.Uri.file(filePath);
+        await vscode.workspace.fs.writeFile(uri, Buffer.from(item.suggestion.template));
+        created.push(item.suggestion.name);
+    }
+
+    if (created.length > 0) {
+        vscode.window.showInformationMessage(`Created ${created.length} skill(s): ${created.join(', ')}`);
+        skillsProvider.refresh();
+        openFile(path.join(skillsBase, created[0], 'SKILL.md'));
     }
 }
 
