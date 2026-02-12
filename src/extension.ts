@@ -2,10 +2,14 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { ClaudeTreeProvider, ClaudeItemNode } from './providers/ClaudeTreeProvider';
+import { MetricsTreeProvider } from './providers/MetricsTreeProvider';
+import { MetricsDashboard } from './webview/MetricsDashboard';
 import { AutoContextService, AgentSuggestion } from './services/AutoContextService';
 
 let agentsProvider: ClaudeTreeProvider;
 let commandsProvider: ClaudeTreeProvider;
+let skillsProvider: ClaudeTreeProvider;
+let metricsProvider: MetricsTreeProvider;
 
 /**
  * Check if user has accepted skip permissions, or ask them
@@ -61,10 +65,17 @@ export function activate(context: vscode.ExtensionContext) {
     // Create tree data providers
     agentsProvider = new ClaudeTreeProvider(workspaceRoot, 'agent');
     commandsProvider = new ClaudeTreeProvider(workspaceRoot, 'command');
+    skillsProvider = new ClaudeTreeProvider(workspaceRoot, 'skill');
+    metricsProvider = new MetricsTreeProvider(workspaceRoot);
 
     // Register tree views
     vscode.window.registerTreeDataProvider('claudeAgents', agentsProvider);
     vscode.window.registerTreeDataProvider('claudeCommands', commandsProvider);
+    vscode.window.registerTreeDataProvider('claudeSkills', skillsProvider);
+    vscode.window.registerTreeDataProvider('claudeMetrics', metricsProvider);
+
+    // Metrics dashboard instance
+    let metricsDashboard: MetricsDashboard | undefined;
 
     // Register commands
     context.subscriptions.push(
@@ -76,12 +87,20 @@ export function activate(context: vscode.ExtensionContext) {
             openFile(node.item.filePath);
         }),
 
+        vscode.commands.registerCommand('claudeCodeManager.openSkill', (node: ClaudeItemNode) => {
+            openFile(node.item.filePath);
+        }),
+
         vscode.commands.registerCommand('claudeCodeManager.createAgent', async () => {
             await createNewItem('agent', workspaceRoot);
         }),
 
         vscode.commands.registerCommand('claudeCodeManager.createCommand', async () => {
             await createNewItem('command', workspaceRoot);
+        }),
+
+        vscode.commands.registerCommand('claudeCodeManager.createSkill', async () => {
+            await createNewSkill(workspaceRoot);
         }),
 
         vscode.commands.registerCommand('claudeCodeManager.deleteItem', async (node: ClaudeItemNode) => {
@@ -91,6 +110,8 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('claudeCodeManager.refresh', () => {
             agentsProvider.refresh();
             commandsProvider.refresh();
+            skillsProvider.refresh();
+            metricsProvider.refresh();
         }),
 
         vscode.commands.registerCommand('claudeCodeManager.enableItem', async (node: ClaudeItemNode) => {
@@ -111,24 +132,31 @@ export function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand('claudeCodeManager.changeModel', async (node: ClaudeItemNode) => {
             await changeAgentModel(node);
+        }),
+
+        vscode.commands.registerCommand('claudeCodeManager.openMetricsDashboard', () => {
+            if (!metricsDashboard) {
+                metricsDashboard = new MetricsDashboard(workspaceRoot);
+            }
+            metricsDashboard.show();
         })
     );
 
-    // Watch for changes in .claude directories (including disabled folders)
-    const watcher = vscode.workspace.createFileSystemWatcher('**/.claude/{agents,commands,agents-disabled,commands-disabled}/**/*.md');
-    watcher.onDidCreate(() => {
-        agentsProvider.refresh();
-        commandsProvider.refresh();
-    });
-    watcher.onDidChange(() => {
-        agentsProvider.refresh();
-        commandsProvider.refresh();
-    });
-    watcher.onDidDelete(() => {
-        agentsProvider.refresh();
-        commandsProvider.refresh();
-    });
+    // Watch for changes in .claude directories (including disabled folders and skills)
+    const watcher = vscode.workspace.createFileSystemWatcher(
+        '**/.claude/{agents,commands,skills,agents-disabled,commands-disabled,skills-disabled}/**/*.md'
+    );
+    watcher.onDidCreate(() => refreshAll());
+    watcher.onDidChange(() => refreshAll());
+    watcher.onDidDelete(() => refreshAll());
     context.subscriptions.push(watcher);
+}
+
+function refreshAll() {
+    agentsProvider.refresh();
+    commandsProvider.refresh();
+    skillsProvider.refresh();
+    metricsProvider.refresh();
 }
 
 function openFile(filePath: string) {
@@ -409,11 +437,43 @@ async function showAgentSuggestions(suggestions: AgentSuggestion[], workspaceRoo
 
 async function toggleItemState(node: ClaudeItemNode, enable: boolean) {
     const item = node.item;
+
+    if (item.type === 'skill') {
+        // Skills are directories - move the parent directory
+        const skillDir = path.dirname(item.filePath); // e.g., .claude/skills/my-skill
+        const skillName = path.basename(skillDir);
+        const baseDir = path.dirname(path.dirname(skillDir)); // e.g., .claude
+        const targetFolder = enable ? 'skills' : 'skills-disabled';
+        const targetDir = path.join(baseDir, targetFolder, skillName);
+
+        if (!fs.existsSync(path.join(baseDir, targetFolder))) {
+            fs.mkdirSync(path.join(baseDir, targetFolder), { recursive: true });
+        }
+
+        if (fs.existsSync(targetDir)) {
+            vscode.window.showErrorMessage(`A skill with this name already exists in the ${enable ? 'enabled' : 'disabled'} folder.`);
+            return;
+        }
+
+        try {
+            const sourceUri = vscode.Uri.file(skillDir);
+            const targetUri = vscode.Uri.file(targetDir);
+            await vscode.workspace.fs.rename(sourceUri, targetUri);
+
+            const action = enable ? 'Enabled' : 'Disabled';
+            vscode.window.showInformationMessage(`${action} skill: ${item.name}`);
+            refreshAll();
+        } catch (error) {
+            vscode.window.showErrorMessage(`Failed to ${enable ? 'enable' : 'disable'}: ${error}`);
+        }
+        return;
+    }
+
+    // Agents and commands: move the file
     const currentDir = path.dirname(item.filePath);
     const fileName = path.basename(item.filePath);
     const baseDir = path.dirname(currentDir);
 
-    // Determine source and target folders
     let targetFolder: string;
     if (item.type === 'agent') {
         targetFolder = enable ? 'agents' : 'agents-disabled';
@@ -443,10 +503,7 @@ async function toggleItemState(node: ClaudeItemNode, enable: boolean) {
 
         const action = enable ? 'Enabled' : 'Disabled';
         vscode.window.showInformationMessage(`${action} ${item.type}: ${item.name}`);
-
-        // Refresh views
-        agentsProvider.refresh();
-        commandsProvider.refresh();
+        refreshAll();
     } catch (error) {
         vscode.window.showErrorMessage(`Failed to ${enable ? 'enable' : 'disable'}: ${error}`);
     }
@@ -518,11 +575,75 @@ async function createNewItem(type: 'agent' | 'command', workspaceRoot: string | 
     // Open the file
     openFile(filePath);
 
-    // Refresh views
-    agentsProvider.refresh();
-    commandsProvider.refresh();
-
+    refreshAll();
     vscode.window.showInformationMessage(`Created new ${type}: ${name}`);
+}
+
+async function createNewSkill(workspaceRoot: string | undefined) {
+    // Ask for location
+    const location = await vscode.window.showQuickPick(
+        [
+            { label: 'Project', description: 'Create in .claude/skills of current workspace', value: 'project' },
+            { label: 'Global', description: 'Create in ~/.claude/skills (available everywhere)', value: 'global' }
+        ],
+        { placeHolder: 'Where do you want to create the skill?' }
+    );
+
+    if (!location) {
+        return;
+    }
+
+    if (location.value === 'project' && !workspaceRoot) {
+        vscode.window.showErrorMessage('No workspace folder open. Please open a folder first or choose Global location.');
+        return;
+    }
+
+    // Ask for name
+    const name = await vscode.window.showInputBox({
+        prompt: 'Enter the skill name',
+        placeHolder: 'my-skill',
+        validateInput: (value) => {
+            if (!value) {
+                return 'Name is required';
+            }
+            if (!/^[a-z0-9-]+$/.test(value)) {
+                return 'Name should only contain lowercase letters, numbers, and hyphens';
+            }
+            return null;
+        }
+    });
+
+    if (!name) {
+        return;
+    }
+
+    // Determine base path
+    const basePath = location.value === 'global'
+        ? path.join(process.env.HOME || process.env.USERPROFILE || '', '.claude')
+        : path.join(workspaceRoot!, '.claude');
+
+    const skillDir = path.join(basePath, 'skills', name);
+    const filePath = path.join(skillDir, 'SKILL.md');
+
+    // Check if skill already exists
+    if (fs.existsSync(skillDir)) {
+        vscode.window.showErrorMessage(`A skill with this name already exists.`);
+        return;
+    }
+
+    // Create directory
+    fs.mkdirSync(skillDir, { recursive: true });
+
+    // Create SKILL.md with template
+    const template = getSkillTemplate(name);
+    const uri = vscode.Uri.file(filePath);
+    await vscode.workspace.fs.writeFile(uri, Buffer.from(template));
+
+    // Open the file
+    openFile(filePath);
+
+    refreshAll();
+    vscode.window.showInformationMessage(`Created new skill: ${name}`);
 }
 
 function getAgentTemplate(name: string): string {
@@ -530,6 +651,10 @@ function getAgentTemplate(name: string): string {
 name: ${name}
 description: Description of what this agent does and when to use it
 model: sonnet
+# tools: [Bash, Read, Write]
+# permissionMode: default
+# maxTurns: 10
+# skills: []
 ---
 
 You are a specialized agent for [describe purpose].
@@ -572,6 +697,19 @@ Use \$1, \$2, etc. for specific positional arguments.
 `;
 }
 
+function getSkillTemplate(name: string): string {
+    return `---
+name: ${name}
+description: What this skill does
+argument-hint: "[args]"
+user-invocable: true
+model: sonnet
+---
+
+Instructions for the skill...
+`;
+}
+
 async function deleteItem(node: ClaudeItemNode) {
     const confirm = await vscode.window.showWarningMessage(
         `Are you sure you want to delete "${node.item.name}"?`,
@@ -584,11 +722,18 @@ async function deleteItem(node: ClaudeItemNode) {
     }
 
     try {
-        const uri = vscode.Uri.file(node.item.filePath);
-        await vscode.workspace.fs.delete(uri);
+        if (node.item.type === 'skill') {
+            // Skills are directories - delete the parent directory
+            const skillDir = path.dirname(node.item.filePath);
+            const uri = vscode.Uri.file(skillDir);
+            await vscode.workspace.fs.delete(uri, { recursive: true });
+        } else {
+            const uri = vscode.Uri.file(node.item.filePath);
+            await vscode.workspace.fs.delete(uri);
+        }
+
         vscode.window.showInformationMessage(`Deleted ${node.item.type}: ${node.item.name}`);
-        agentsProvider.refresh();
-        commandsProvider.refresh();
+        refreshAll();
     } catch (error) {
         vscode.window.showErrorMessage(`Failed to delete: ${error}`);
     }

@@ -1,8 +1,8 @@
 {
   "name": "cc-agent-manager",
   "displayName": "CC-Agent Manager",
-  "description": "Manage Claude Code agents and commands from the VS Code sidebar",
-  "version": "1.0.0",
+  "description": "Manage Claude Code agents, commands, skills, and usage metrics from the VS Code sidebar",
+  "version": "2.0.0",
   "publisher": "kevinzeladacl",
   "repository": {
     "type": "git",
@@ -49,6 +49,16 @@
           "id": "claudeCommands",
           "name": "Commands",
           "contextualTitle": "Claude Commands"
+        },
+        {
+          "id": "claudeSkills",
+          "name": "Skills",
+          "contextualTitle": "Claude Skills"
+        },
+        {
+          "id": "claudeMetrics",
+          "name": "Usage Metrics",
+          "contextualTitle": "Claude Usage Metrics"
         }
       ]
     },
@@ -64,6 +74,11 @@
         "icon": "$(edit)"
       },
       {
+        "command": "claudeCodeManager.openSkill",
+        "title": "Open Skill",
+        "icon": "$(edit)"
+      },
+      {
         "command": "claudeCodeManager.createAgent",
         "title": "Create New Agent",
         "icon": "$(add)"
@@ -71,6 +86,11 @@
       {
         "command": "claudeCodeManager.createCommand",
         "title": "Create New Command",
+        "icon": "$(add)"
+      },
+      {
+        "command": "claudeCodeManager.createSkill",
+        "title": "Create New Skill",
         "icon": "$(add)"
       },
       {
@@ -107,6 +127,11 @@
         "command": "claudeCodeManager.changeModel",
         "title": "Change Model",
         "icon": "$(symbol-enum)"
+      },
+      {
+        "command": "claudeCodeManager.openMetricsDashboard",
+        "title": "Open Metrics Dashboard",
+        "icon": "$(graph)"
       }
     ],
     "configuration": {
@@ -142,8 +167,18 @@
           "group": "navigation@1"
         },
         {
+          "command": "claudeCodeManager.createSkill",
+          "when": "view == claudeSkills",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeCodeManager.openMetricsDashboard",
+          "when": "view == claudeMetrics",
+          "group": "navigation@1"
+        },
+        {
           "command": "claudeCodeManager.refresh",
-          "when": "view == claudeAgents || view == claudeCommands",
+          "when": "view == claudeAgents || view == claudeCommands || view == claudeSkills || view == claudeMetrics",
           "group": "navigation@3"
         }
       ],
@@ -159,18 +194,23 @@
           "group": "inline@1"
         },
         {
+          "command": "claudeCodeManager.openSkill",
+          "when": "view == claudeSkills && (viewItem == skill-enabled || viewItem == skill-disabled)",
+          "group": "inline@1"
+        },
+        {
           "command": "claudeCodeManager.changeModel",
           "when": "view == claudeAgents && (viewItem == agent-enabled || viewItem == agent-disabled)",
           "group": "inline@2"
         },
         {
           "command": "claudeCodeManager.enableItem",
-          "when": "viewItem == agent-disabled || viewItem == command-disabled",
+          "when": "viewItem == agent-disabled || viewItem == command-disabled || viewItem == skill-disabled",
           "group": "inline@3"
         },
         {
           "command": "claudeCodeManager.disableItem",
-          "when": "viewItem == agent-enabled || viewItem == command-enabled",
+          "when": "viewItem == agent-enabled || viewItem == command-enabled || viewItem == skill-enabled",
           "group": "inline@3"
         },
         {
@@ -185,17 +225,17 @@
         },
         {
           "command": "claudeCodeManager.enableItem",
-          "when": "viewItem == agent-disabled || viewItem == command-disabled",
+          "when": "viewItem == agent-disabled || viewItem == command-disabled || viewItem == skill-disabled",
           "group": "3_state"
         },
         {
           "command": "claudeCodeManager.disableItem",
-          "when": "viewItem == agent-enabled || viewItem == command-enabled",
+          "when": "viewItem == agent-enabled || viewItem == command-enabled || viewItem == skill-enabled",
           "group": "3_state"
         },
         {
           "command": "claudeCodeManager.deleteItem",
-          "when": "viewItem == agent-enabled || viewItem == agent-disabled || viewItem == command-enabled || viewItem == command-disabled",
+          "when": "viewItem == agent-enabled || viewItem == agent-disabled || viewItem == command-enabled || viewItem == command-disabled || viewItem == skill-enabled || viewItem == skill-disabled",
           "group": "4_danger"
         }
       ]
