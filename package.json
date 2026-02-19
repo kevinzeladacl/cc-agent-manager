@@ -2,7 +2,7 @@
   "name": "cc-agent-manager",
   "displayName": "CC-Agent Manager",
   "description": "Manage Claude Code agents, commands, skills, and usage metrics from the VS Code sidebar",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "publisher": "kevinzeladacl",
   "repository": {
     "type": "git",
@@ -41,6 +41,16 @@
     "views": {
       "claude-code-manager": [
         {
+          "id": "claudeQuickActions",
+          "name": "Quick Actions",
+          "contextualTitle": "Quick Actions"
+        },
+        {
+          "id": "claudeMarkdownFiles",
+          "name": "Markdown Files",
+          "contextualTitle": "Project Markdown Files"
+        },
+        {
           "id": "claudeAgents",
           "name": "Agents",
           "contextualTitle": "Claude Agents"
@@ -63,6 +73,16 @@
       ]
     },
     "commands": [
+      {
+        "command": "claudeCodeManager.openMarkdown",
+        "title": "Open Markdown File",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "claudeCodeManager.refreshMarkdown",
+        "title": "Refresh Markdown Files",
+        "icon": "$(refresh)"
+      },
       {
         "command": "claudeCodeManager.openAgent",
         "title": "Open Agent",
@@ -142,25 +162,25 @@
         "command": "claudeCodeManager.suggestSkills",
         "title": "Suggest Skills",
         "icon": "$(sparkle)"
+      },
+      {
+        "command": "claudeCodeManager.autoGenerate",
+        "title": "AutoGenerate",
+        "icon": "$(sparkle)"
+      },
+      {
+        "command": "claudeCodeManager.updateClaudeMd",
+        "title": "Update CLAUDE.md",
+        "icon": "$(file-text)"
       }
     ],
-    "configuration": {
-      "title": "CC-Agent Manager",
-      "properties": {
-        "ccAgentManager.skipPermissionPrompts": {
-          "type": "boolean",
-          "default": false,
-          "description": "Skip Claude Code permission prompts when generating auto-context. Required for non-interactive execution."
-        },
-        "ccAgentManager.skipPermissionPromptsAsked": {
-          "type": "boolean",
-          "default": false,
-          "description": "Internal: Whether the user has been asked about skip permissions."
-        }
-      }
-    },
     "menus": {
       "view/title": [
+        {
+          "command": "claudeCodeManager.refreshMarkdown",
+          "when": "view == claudeMarkdownFiles",
+          "group": "navigation@1"
+        },
         {
           "command": "claudeCodeManager.autoContext",
           "when": "view == claudeAgents",
