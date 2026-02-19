@@ -1,4 +1,3 @@
-import * as vscode from 'vscode';
 import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -9,135 +8,31 @@ export interface ClaudeResponse {
     error?: string;
 }
 
+export interface AgentSuggestion {
+    name: string;
+    description: string;
+    reason: string;
+    template: string;
+}
+
+export interface CommandSuggestion {
+    name: string;
+    description: string;
+    reason: string;
+    template: string;
+}
+
+export interface SkillSuggestion {
+    name: string;
+    description: string;
+    reason: string;
+    template: string;
+}
+
 export class ClaudeCodeService {
-    private skipPermissions: boolean = false;
+    private outputChannel: any = null;
 
     constructor(private workspaceRoot: string) {}
-
-    /**
-     * Set whether to skip permission prompts
-     */
-    setSkipPermissions(skip: boolean) {
-        this.skipPermissions = skip;
-    }
-
-    /**
-     * Read key project files to provide context (limited to ~8000 chars total)
-     */
-    getProjectContext(): string {
-        const contextParts: string[] = [];
-        const MAX_FILE_SIZE = 2000; // Max chars per file
-        const MAX_TOTAL = 8000; // Max total chars
-        let totalChars = 0;
-
-        // Priority 1: CLAUDE.md (most important for agent context)
-        const claudePath = path.join(this.workspaceRoot, 'CLAUDE.md');
-        if (fs.existsSync(claudePath) && totalChars < MAX_TOTAL) {
-            const content = fs.readFileSync(claudePath, 'utf-8');
-            const trimmed = content.substring(0, MAX_FILE_SIZE);
-            contextParts.push(`## CLAUDE.md\n${trimmed}`);
-            totalChars += trimmed.length;
-        }
-
-        // Priority 2: README.md (project overview)
-        const readmePath = path.join(this.workspaceRoot, 'README.md');
-        if (fs.existsSync(readmePath) && totalChars < MAX_TOTAL) {
-            const content = fs.readFileSync(readmePath, 'utf-8');
-            const remaining = Math.min(MAX_FILE_SIZE, MAX_TOTAL - totalChars);
-            const trimmed = content.substring(0, remaining);
-            contextParts.push(`## README.md\n${trimmed}`);
-            totalChars += trimmed.length;
-        }
-
-        // Priority 3: package.json (extract key info only)
-        const packagePath = path.join(this.workspaceRoot, 'package.json');
-        if (fs.existsSync(packagePath) && totalChars < MAX_TOTAL) {
-            try {
-                const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf-8'));
-                const summary = JSON.stringify({
-                    name: pkg.name,
-                    description: pkg.description,
-                    scripts: pkg.scripts,
-                    dependencies: pkg.dependencies ? Object.keys(pkg.dependencies) : [],
-                    devDependencies: pkg.devDependencies ? Object.keys(pkg.devDependencies) : []
-                }, null, 2);
-                contextParts.push(`## package.json\n${summary}`);
-                totalChars += summary.length;
-            } catch { /* skip */ }
-        }
-
-        // Priority 4: pyproject.toml
-        const pyprojectPath = path.join(this.workspaceRoot, 'pyproject.toml');
-        if (fs.existsSync(pyprojectPath) && totalChars < MAX_TOTAL) {
-            const content = fs.readFileSync(pyprojectPath, 'utf-8');
-            const remaining = Math.min(1000, MAX_TOTAL - totalChars);
-            const trimmed = content.substring(0, remaining);
-            contextParts.push(`## pyproject.toml\n${trimmed}`);
-            totalChars += trimmed.length;
-        }
-
-        // Priority 5: Directory structure (2 levels)
-        if (totalChars < MAX_TOTAL) {
-            const structure = this.getDirectoryStructure(this.workspaceRoot, 0, 2);
-            const remaining = Math.min(1000, MAX_TOTAL - totalChars);
-            contextParts.push(`## Structure\n${structure.substring(0, remaining)}`);
-        }
-
-        return contextParts.join('\n\n');
-    }
-
-    /**
-     * Get list of files being read for progress reporting
-     */
-    getReadableFiles(): string[] {
-        const files: string[] = [];
-        const checkFiles = ['README.md', 'CLAUDE.md', 'package.json', 'pyproject.toml', 'requirements.txt'];
-
-        for (const file of checkFiles) {
-            const filePath = path.join(this.workspaceRoot, file);
-            if (fs.existsSync(filePath)) {
-                files.push(file);
-            }
-        }
-        return files;
-    }
-
-    /**
-     * Get directory structure as tree
-     */
-    private getDirectoryStructure(dir: string, depth: number, maxDepth: number): string {
-        if (depth > maxDepth) return '';
-
-        const skipDirs = ['node_modules', '.git', 'dist', 'out', 'build', '__pycache__', 'venv', '.venv', '.idea', '.vscode'];
-        const lines: string[] = [];
-        const indent = '  '.repeat(depth);
-
-        try {
-            const entries = fs.readdirSync(dir, { withFileTypes: true });
-
-            for (const entry of entries) {
-                if (entry.name.startsWith('.') && depth === 0) continue;
-                if (skipDirs.includes(entry.name)) continue;
-
-                if (entry.isDirectory()) {
-                    lines.push(`${indent}${entry.name}/`);
-                    const subTree = this.getDirectoryStructure(path.join(dir, entry.name), depth + 1, maxDepth);
-                    if (subTree) lines.push(subTree);
-                } else {
-                    lines.push(`${indent}${entry.name}`);
-                }
-            }
-        } catch (e) {
-            // Ignore permission errors
-        }
-
-        return lines.join('\n');
-    }
-
-    /**
-     * Execute a prompt using Claude Code CLI
-     */
-    private outputChannel: any = null;
 
     setOutputChannel(channel: any) {
         this.outputChannel = channel;
@@ -149,31 +44,46 @@ export class ClaudeCodeService {
         }
     }
 
+    /**
+     * Check if Claude Code CLI is available
+     */
+    async isAvailable(): Promise<boolean> {
+        return new Promise((resolve) => {
+            const proc = spawn('claude', ['--version'], { shell: true });
+
+            proc.on('close', (code) => resolve(code === 0));
+            proc.on('error', () => resolve(false));
+
+            setTimeout(() => {
+                proc.kill();
+                resolve(false);
+            }, 5000);
+        });
+    }
+
+    /**
+     * Execute a prompt using Claude Code CLI
+     * Always uses --dangerously-skip-permissions (Claude Code is required)
+     */
     async execute(prompt: string, options?: {
-        maxTokens?: number;
         timeout?: number;
+        model?: string;
     }): Promise<ClaudeResponse> {
-        const timeout = options?.timeout || 300000; // 5 min default
+        const timeout = options?.timeout || 300000;
+        const model = options?.model || 'sonnet';
 
         return new Promise((resolve) => {
-            // Use stdin to pass prompt (avoids shell escaping issues)
             const args = [
-                '-p',  // Print mode
-                '--model', 'sonnet'
+                '-p',
+                '--model', model,
+                '--dangerously-skip-permissions'
             ];
 
-            // Only add skip-permissions flag if user has opted in
-            if (this.skipPermissions) {
-                args.push('--dangerously-skip-permissions');
-            }
-
-            this.log(`    [Claude] Starting process (model: sonnet)...`);
+            this.log(`    [Claude] Starting process (model: ${model})...`);
             this.log(`    [Claude] Prompt length: ${prompt.length} chars`);
 
             const startTime = Date.now();
-            let lastUpdate = startTime;
 
-            // Find claude executable
             const home = process.env.HOME || process.env.USERPROFILE || '';
             const claudePath = `${home}/.local/bin/claude`;
 
@@ -183,11 +93,9 @@ export class ClaudeCodeService {
                 shell: false
             });
 
-            // Send prompt via stdin
             proc.stdin.write(prompt);
             proc.stdin.end();
 
-            // Show waiting indicator every 10 seconds
             const waitingInterval = setInterval(() => {
                 const elapsed = Math.round((Date.now() - startTime) / 1000);
                 this.log(`    [Claude] Waiting... ${elapsed}s elapsed`);
@@ -199,7 +107,6 @@ export class ClaudeCodeService {
             proc.stdout.on('data', (data) => {
                 const chunk = data.toString();
                 stdout += chunk;
-                // Show live output
                 if (this.outputChannel && chunk.trim()) {
                     const elapsed = Math.round((Date.now() - startTime) / 1000);
                     this.log(`    [Claude ${elapsed}s] Receiving response...`);
@@ -231,10 +138,7 @@ export class ClaudeCodeService {
                 const elapsed = Math.round((Date.now() - startTime) / 1000);
                 this.log(`    [Claude] Process ended with code ${code} (${elapsed}s)`);
                 if (code === 0) {
-                    resolve({
-                        success: true,
-                        content: stdout.trim()
-                    });
+                    resolve({ success: true, content: stdout.trim() });
                 } else {
                     resolve({
                         success: false,
@@ -258,73 +162,258 @@ export class ClaudeCodeService {
     }
 
     /**
-     * Check if Claude Code CLI is available
+     * Read key project files to provide context (limited to ~8000 chars total)
      */
-    async isAvailable(): Promise<boolean> {
-        return new Promise((resolve) => {
-            const proc = spawn('claude', ['--version'], {
-                shell: true
-            });
+    getProjectContext(): string {
+        const contextParts: string[] = [];
+        const MAX_FILE_SIZE = 2000;
+        const MAX_TOTAL = 8000;
+        let totalChars = 0;
 
-            proc.on('close', (code) => {
-                resolve(code === 0);
-            });
+        const claudePath = path.join(this.workspaceRoot, 'CLAUDE.md');
+        if (fs.existsSync(claudePath) && totalChars < MAX_TOTAL) {
+            const content = fs.readFileSync(claudePath, 'utf-8');
+            const trimmed = content.substring(0, MAX_FILE_SIZE);
+            contextParts.push(`## CLAUDE.md\n${trimmed}`);
+            totalChars += trimmed.length;
+        }
 
-            proc.on('error', () => {
-                resolve(false);
-            });
+        const readmePath = path.join(this.workspaceRoot, 'README.md');
+        if (fs.existsSync(readmePath) && totalChars < MAX_TOTAL) {
+            const content = fs.readFileSync(readmePath, 'utf-8');
+            const remaining = Math.min(MAX_FILE_SIZE, MAX_TOTAL - totalChars);
+            const trimmed = content.substring(0, remaining);
+            contextParts.push(`## README.md\n${trimmed}`);
+            totalChars += trimmed.length;
+        }
 
-            // Timeout after 5 seconds
-            setTimeout(() => {
-                proc.kill();
-                resolve(false);
-            }, 5000);
-        });
+        const packagePath = path.join(this.workspaceRoot, 'package.json');
+        if (fs.existsSync(packagePath) && totalChars < MAX_TOTAL) {
+            try {
+                const pkg = JSON.parse(fs.readFileSync(packagePath, 'utf-8'));
+                const summary = JSON.stringify({
+                    name: pkg.name,
+                    description: pkg.description,
+                    scripts: pkg.scripts,
+                    dependencies: pkg.dependencies ? Object.keys(pkg.dependencies) : [],
+                    devDependencies: pkg.devDependencies ? Object.keys(pkg.devDependencies) : []
+                }, null, 2);
+                contextParts.push(`## package.json\n${summary}`);
+                totalChars += summary.length;
+            } catch { /* skip */ }
+        }
+
+        const pyprojectPath = path.join(this.workspaceRoot, 'pyproject.toml');
+        if (fs.existsSync(pyprojectPath) && totalChars < MAX_TOTAL) {
+            const content = fs.readFileSync(pyprojectPath, 'utf-8');
+            const remaining = Math.min(1000, MAX_TOTAL - totalChars);
+            const trimmed = content.substring(0, remaining);
+            contextParts.push(`## pyproject.toml\n${trimmed}`);
+            totalChars += trimmed.length;
+        }
+
+        if (totalChars < MAX_TOTAL) {
+            const structure = this.getDirectoryStructure(this.workspaceRoot, 0, 2);
+            const remaining = Math.min(1000, MAX_TOTAL - totalChars);
+            contextParts.push(`## Structure\n${structure.substring(0, remaining)}`);
+        }
+
+        return contextParts.join('\n\n');
     }
 
     /**
-     * Analyze project and suggest agents using Claude
+     * Get directory structure as tree
      */
-    async analyzeProjectForAgents(projectFiles: string[]): Promise<ClaudeResponse> {
+    private getDirectoryStructure(dir: string, depth: number, maxDepth: number): string {
+        if (depth > maxDepth) return '';
+
+        const skipDirs = ['node_modules', '.git', 'dist', 'out', 'build', '__pycache__', 'venv', '.venv', '.idea', '.vscode'];
+        const lines: string[] = [];
+        const indent = '  '.repeat(depth);
+
+        try {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+
+            for (const entry of entries) {
+                if (entry.name.startsWith('.') && depth === 0) continue;
+                if (skipDirs.includes(entry.name)) continue;
+
+                if (entry.isDirectory()) {
+                    lines.push(`${indent}${entry.name}/`);
+                    const subTree = this.getDirectoryStructure(path.join(dir, entry.name), depth + 1, maxDepth);
+                    if (subTree) lines.push(subTree);
+                } else {
+                    lines.push(`${indent}${entry.name}`);
+                }
+            }
+        } catch {
+            // Ignore permission errors
+        }
+
+        return lines.join('\n');
+    }
+
+    // ── Suggest methods (1 CLI call each, delimiter-based parsing) ──
+
+    /**
+     * Suggest agents for the project in a single CLI call.
+     * Returns complete templates ready to write to disk.
+     */
+    async suggestAgents(model?: string): Promise<AgentSuggestion[]> {
         const projectContext = this.getProjectContext();
 
-        const prompt = `You are analyzing a software project to suggest specialized Claude Code agents.
+        const prompt = `Analyze this project and suggest 2-4 specialized Claude Code agents.
 
-PROJECT CONTEXT:
+PROJECT:
 ${projectContext}
 
-Based on this project's tech stack, structure, and purpose, suggest 2-4 highly specialized agents.
+For each agent, output EXACTLY this format (no other text, no code fences):
 
-IMPORTANT:
-- Each agent should be SPECIFIC to this project, not generic
-- Focus on the actual technologies and patterns used
-- Consider the project's domain (what it does)
+===AGENT===
+name: kebab-case-name
+description: What this agent does
+reason: Why it's useful
+===TEMPLATE===
+---
+name: kebab-case-name
+description: What this agent does
+model: sonnet
+---
 
-For each agent provide:
-1. name: kebab-case identifier (e.g., "fastapi-endpoints", "ionic-components", "sqlalchemy-models")
-2. description: One specific line about what this agent handles IN THIS PROJECT
-3. reason: Why this specific agent is valuable for THIS project's workflow
+You are a [role] for this project...
 
-Format as JSON array ONLY (no markdown, no explanation):
-[{"name": "...", "description": "...", "reason": "..."}]`;
+## Your Responsibilities
+- [responsibility]
 
-        return this.execute(prompt, { timeout: 60000 });
+## Guidelines
+- [guideline]
+===END===`;
+
+        const response = await this.execute(prompt, { timeout: 120000, model });
+        if (!response.success) {
+            this.log(`    [suggestAgents] CLI failed: ${response.error}`);
+            return [];
+        }
+
+        this.log(`    [suggestAgents] Raw response length: ${response.content.length}`);
+        const suggestions = this.parseAgentSuggestions(response.content);
+        this.log(`    [suggestAgents] Parsed ${suggestions.length} suggestions`);
+        return suggestions;
     }
 
     /**
-     * Generate complete agent (prompt + context) in a single call
-     * NOTE: Claude Code already has access to the project files, so we just give instructions
-     * Uses a 90-second timeout to avoid hanging on slow responses
+     * Suggest commands for the project in a single CLI call.
      */
-    async generateFullAgent(agentName: string, agentDescription: string, currentPrompt: string): Promise<ClaudeResponse> {
-        const hasExistingPrompt = currentPrompt && currentPrompt.length > 50;
+    async suggestCommands(model?: string): Promise<CommandSuggestion[]> {
+        const projectContext = this.getProjectContext();
 
-        const prompt = hasExistingPrompt
-            ? `Read this project's CLAUDE.md and README.md, then improve this agent prompt.
+        const prompt = `Analyze this project and suggest 2-4 slash commands for daily workflow.
+
+PROJECT:
+${projectContext}
+
+For each command, output EXACTLY this format (no other text, no code fences):
+
+===COMMAND===
+name: kebab-case-name
+description: What this command does
+reason: Why it saves time
+===TEMPLATE===
+---
+description: What this command does
+---
+
+# command-name Command
+
+Instructions for the command...
+===END===`;
+
+        const response = await this.execute(prompt, { timeout: 120000, model });
+        if (!response.success) {
+            this.log(`    [suggestCommands] CLI failed: ${response.error}`);
+            return [];
+        }
+
+        this.log(`    [suggestCommands] Raw response length: ${response.content.length}`);
+        const suggestions = this.parseCommandSuggestions(response.content);
+        this.log(`    [suggestCommands] Parsed ${suggestions.length} suggestions`);
+        return suggestions;
+    }
+
+    /**
+     * Suggest skills for the project in a single CLI call.
+     */
+    async suggestSkills(model?: string): Promise<SkillSuggestion[]> {
+        const projectContext = this.getProjectContext();
+
+        const prompt = `Analyze this project and suggest 2-4 reusable skills (SKILL.md files).
+
+PROJECT:
+${projectContext}
+
+For each skill, output EXACTLY this format (no other text, no code fences):
+
+===SKILL===
+name: kebab-case-name
+description: What this skill does
+reason: Why it's useful
+===TEMPLATE===
+---
+name: kebab-case-name
+description: What this skill does
+argument-hint: "[args]"
+user-invocable: true
+model: sonnet
+---
+
+Instructions for the skill...
+===END===`;
+
+        const response = await this.execute(prompt, { timeout: 120000, model });
+        if (!response.success) {
+            this.log(`    [suggestSkills] CLI failed: ${response.error}`);
+            return [];
+        }
+
+        this.log(`    [suggestSkills] Raw response length: ${response.content.length}`);
+        const suggestions = this.parseSkillSuggestions(response.content);
+        this.log(`    [suggestSkills] Parsed ${suggestions.length} suggestions`);
+        return suggestions;
+    }
+
+    /**
+     * Update an existing agent's prompt and context in a single CLI call.
+     * Claude Code reads the project files directly.
+     */
+    async updateAgentContext(agentPath: string): Promise<{ success: boolean; method: string; error?: string }> {
+        const agentName = path.basename(agentPath, '.md');
+
+        try {
+            let content = fs.readFileSync(agentPath, 'utf-8');
+
+            // Parse frontmatter
+            const { frontmatter, body } = this.parseFrontmatter(content, agentName);
+
+            // Remove old auto-generated context
+            let cleanBody = body;
+            const contextMarker = '## Project Context (Auto-generated)';
+            const markerIndex = cleanBody.indexOf(contextMarker);
+            if (markerIndex !== -1) {
+                cleanBody = cleanBody.substring(0, markerIndex).trimEnd();
+            }
+
+            // Get description from frontmatter
+            const descMatch = frontmatter.match(/description:\s*(.+)/);
+            const agentDescription = descMatch ? descMatch[1].trim() : `Specialized agent for ${agentName}`;
+
+            const hasExistingPrompt = cleanBody.length > 50;
+
+            const prompt = hasExistingPrompt
+                ? `Read this project's CLAUDE.md and README.md, then improve this agent prompt.
 
 AGENT: ${agentName}
 CURRENT PROMPT:
-${currentPrompt.substring(0, 500)}
+${cleanBody.substring(0, 500)}
 
 TASK:
 1. Read CLAUDE.md and README.md to understand the project
@@ -335,7 +424,7 @@ OUTPUT (markdown only):
 - Start with "You are..."
 - Include specific paths, commands, and tech from the project
 - End with "## Project Context (Auto-generated)" section containing overview, tech stack, key directories, and commands`
-            : `Read this project's CLAUDE.md and README.md, then create an agent prompt.
+                : `Read this project's CLAUDE.md and README.md, then create an agent prompt.
 
 AGENT: ${agentName}
 PURPOSE: ${agentDescription}
@@ -352,136 +441,189 @@ OUTPUT (markdown only):
 - Guidelines with actual commands from the project
 - End with "## Project Context (Auto-generated)" section containing overview, tech stack, key directories, and commands`;
 
-        // Use 90-second timeout to avoid hanging
-        return this.execute(prompt, { timeout: 90000 });
+            const response = await this.execute(prompt, { timeout: 90000 });
+
+            if (!response.success) {
+                return {
+                    success: false,
+                    method: 'failed',
+                    error: response.error || 'Claude Code execution failed'
+                };
+            }
+
+            // Rebuild file: frontmatter + new prompt from Claude
+            const newContent = `${frontmatter}\n\n${response.content}`;
+            fs.writeFileSync(agentPath, newContent);
+
+            return { success: true, method: 'AI generated' };
+        } catch (error) {
+            return {
+                success: false,
+                method: 'failed',
+                error: error instanceof Error ? error.message : String(error)
+            };
+        }
     }
 
     /**
-     * Generate a complete agent prompt using Claude
+     * Generate a CLAUDE.md tailored to the project by analyzing
+     * project context + what was just created in .claude/
      */
-    async generateAgentPrompt(agentName: string, agentDescription: string, projectContextSummary: string): Promise<ClaudeResponse> {
+    async generateClaudeMd(model?: string): Promise<string | null> {
         const projectContext = this.getProjectContext();
 
-        const prompt = `Create a Claude Code agent prompt.
+        // Scan what exists in .claude/ dirs
+        const createdItems: string[] = [];
+        const scanDirs = [
+            { dir: path.join(this.workspaceRoot, '.claude', 'agents'), label: 'Agents' },
+            { dir: path.join(this.workspaceRoot, '.claude', 'commands'), label: 'Commands' },
+            { dir: path.join(this.workspaceRoot, '.claude', 'skills'), label: 'Skills' }
+        ];
 
-AGENT: ${agentName}
-PURPOSE: ${agentDescription}
+        for (const { dir, label } of scanDirs) {
+            if (!fs.existsSync(dir)) continue;
+            const files = fs.readdirSync(dir).filter(f => f.endsWith('.md') || fs.statSync(path.join(dir, f)).isDirectory());
+            if (files.length > 0) {
+                createdItems.push(`${label}: ${files.map(f => f.replace('.md', '')).join(', ')}`);
+            }
+        }
+
+        const itemsSummary = createdItems.length > 0
+            ? `\n\nClaude Code items in this project:\n${createdItems.join('\n')}`
+            : '';
+
+        const prompt = `You are writing the actual content of a CLAUDE.md file for a project. This file will be saved directly to disk.
 
 PROJECT:
-${projectContext}
+${projectContext}${itemsSummary}
 
-Write a specific agent prompt with:
-- Role definition with project name and tech
-- 4-5 specific responsibilities with real paths
-- Guidelines with actual commands/patterns
-- Constraints
+Write the CLAUDE.md with these sections:
+1. "# <project-name>" — brief overview of what the project does
+2. "## Key Conventions" — coding style, naming patterns, file organization
+3. "## Architecture" — tech stack, directory structure with descriptions, key patterns
+4. "## Development Commands" — build, test, lint commands as a table
+5. "## Claude Code Integration" — list agents, commands, skills if they exist
 
-Be SPECIFIC to this project. Use real paths and tech from above.
-Output markdown only, start with "You are..."`;
+CRITICAL RULES:
+- Your entire response will be saved as CLAUDE.md verbatim. Do NOT include any preamble, explanation, or summary of what you did.
+- Do NOT wrap the output in code fences.
+- Do NOT start with "Here is..." or "The CLAUDE.md has been generated..." or any meta-commentary.
+- Start your response DIRECTLY with "# " followed by the project name.
+- Write concrete, specific content based on actual files — not placeholders like "[Add your conventions]".`;
 
-        return this.execute(prompt);
+        const response = await this.execute(prompt, { timeout: 120000, model });
+        if (!response.success) {
+            this.log(`    [generateClaudeMd] CLI failed: ${response.error}`);
+            return null;
+        }
+
+        return response.content;
+    }
+
+    // ── Parsers ──
+
+    /**
+     * Parse frontmatter from agent file content.
+     * Returns the frontmatter block (with ---) and the body after it.
+     * If no frontmatter exists, creates a minimal one.
+     */
+    private parseFrontmatter(content: string, agentName: string): { frontmatter: string; body: string } {
+        const match = content.match(/^(---\n[\s\S]*?\n---)/);
+        if (match) {
+            const frontmatter = match[1];
+            const body = content.substring(match[0].length).trim();
+            return { frontmatter, body };
+        }
+
+        // No frontmatter - create one
+        const frontmatter = `---\nname: ${agentName}\ndescription: Agent for ${agentName}\nmodel: sonnet\n---`;
+        return { frontmatter, body: content.trim() };
     }
 
     /**
-     * Generate project context summary using Claude
+     * Parse ===AGENT=== delimited blocks from CLI output
      */
-    async generateProjectContext(readmeContent: string, claudeMdContent?: string, otherDocs?: string[]): Promise<ClaudeResponse> {
-        const projectContext = this.getProjectContext();
-
-        const prompt = `Create a context summary for Claude Code agents.
-
-PROJECT:
-${projectContext}
-
-Write a concise context with:
-- Overview (2 sentences)
-- Tech stack
-- Key directories and their purpose
-- Main commands (run, test, build)
-
-Use actual paths from above. Max 300 words.
-Start with "## Project Context (Auto-generated)"`;
-
-        return this.execute(prompt);
+    private parseAgentSuggestions(raw: string): AgentSuggestion[] {
+        return this.parseDelimitedBlocks(raw, 'AGENT').map(block => ({
+            name: block.meta.name || 'unnamed-agent',
+            description: block.meta.description || '',
+            reason: block.meta.reason || '',
+            template: block.template
+        }));
     }
 
     /**
-     * Analyze project and suggest commands using Claude
+     * Parse ===COMMAND=== delimited blocks from CLI output
      */
-    async analyzeProjectForCommands(): Promise<ClaudeResponse> {
-        const projectContext = this.getProjectContext();
-
-        const prompt = `You are analyzing a software project to suggest Claude Code slash commands (invoked with /).
-
-PROJECT CONTEXT:
-${projectContext}
-
-Suggest 2-4 useful slash commands for this project's daily workflow.
-Commands are shortcuts that users invoke with /command-name. They should automate repetitive tasks.
-
-Examples of good commands: /deploy, /lint-fix, /generate-types, /db-migrate, /run-tests
-
-For each command provide:
-1. name: kebab-case (e.g., "run-tests", "deploy-staging")
-2. description: One line about what this command does
-3. reason: Why this command saves time for THIS project
-4. instructions: 3-5 step instructions the command should follow
-
-Format as JSON array ONLY (no markdown, no explanation):
-[{"name": "...", "description": "...", "reason": "...", "instructions": ["step1", "step2"]}]`;
-
-        return this.execute(prompt, { timeout: 60000 });
+    private parseCommandSuggestions(raw: string): CommandSuggestion[] {
+        return this.parseDelimitedBlocks(raw, 'COMMAND').map(block => ({
+            name: block.meta.name || 'unnamed-command',
+            description: block.meta.description || '',
+            reason: block.meta.reason || '',
+            template: block.template
+        }));
     }
 
     /**
-     * Analyze project and suggest skills using Claude
+     * Parse ===SKILL=== delimited blocks from CLI output
      */
-    async analyzeProjectForSkills(): Promise<ClaudeResponse> {
-        const projectContext = this.getProjectContext();
-
-        const prompt = `You are analyzing a software project to suggest Claude Code skills.
-Skills are reusable prompt templates users invoke with /skill-name. They are directory-based with SKILL.md files.
-
-PROJECT CONTEXT:
-${projectContext}
-
-Suggest 2-4 useful skills for this project. Skills should be reusable actions that benefit from project context.
-
-Examples: /review-pr, /write-test, /add-endpoint, /refactor-component
-
-For each skill provide:
-1. name: kebab-case (e.g., "write-test", "add-endpoint")
-2. description: One line about what this skill does
-3. reason: Why this skill is valuable for THIS project
-4. instructions: The detailed prompt instructions for the skill
-
-Format as JSON array ONLY (no markdown, no explanation):
-[{"name": "...", "description": "...", "reason": "...", "instructions": "..."}]`;
-
-        return this.execute(prompt, { timeout: 60000 });
+    private parseSkillSuggestions(raw: string): SkillSuggestion[] {
+        return this.parseDelimitedBlocks(raw, 'SKILL').map(block => ({
+            name: block.meta.name || 'unnamed-skill',
+            description: block.meta.description || '',
+            reason: block.meta.reason || '',
+            template: block.template
+        }));
     }
 
     /**
-     * Update an existing agent with better context
+     * Strip markdown code fences and normalize delimiters in raw CLI output
      */
-    async enhanceAgentPrompt(currentPrompt: string, projectContextSummary: string): Promise<ClaudeResponse> {
-        const projectContext = this.getProjectContext();
+    private cleanRawOutput(raw: string): string {
+        // Remove markdown code fences (```...```)
+        let cleaned = raw.replace(/```[\w]*\n?/g, '');
+        // Normalize delimiter whitespace: "=== AGENT ===" -> "===AGENT==="
+        cleaned = cleaned.replace(/===\s*(\w+)\s*===/g, '===$1===');
+        return cleaned;
+    }
 
-        const prompt = `Improve this agent prompt to be project-specific.
+    /**
+     * Generic parser for delimiter-based blocks.
+     * Handles code fences, extra whitespace, and slight format variations.
+     */
+    private parseDelimitedBlocks(raw: string, type: string): { meta: Record<string, string>; template: string }[] {
+        const cleaned = this.cleanRawOutput(raw);
+        const results: { meta: Record<string, string>; template: string }[] = [];
+        const blockRegex = new RegExp(`===${type}===([\\s\\S]*?)===END===`, 'gi');
 
-CURRENT:
-${currentPrompt.substring(0, 500)}
+        let match;
+        while ((match = blockRegex.exec(cleaned)) !== null) {
+            const blockContent = match[1];
+            const templateSplit = blockContent.split(/===TEMPLATE===/i);
 
-PROJECT:
-${projectContext}
+            if (templateSplit.length < 2) continue;
 
-Rewrite with:
-- Real paths and tech from this project
-- Specific commands and patterns
-- Concrete responsibilities
+            // Parse metadata lines (key: value)
+            const metaLines = templateSplit[0].trim().split('\n');
+            const meta: Record<string, string> = {};
+            for (const line of metaLines) {
+                const kvMatch = line.match(/^([a-z-]+):\s*(.+)$/i);
+                if (kvMatch) {
+                    meta[kvMatch[1].toLowerCase()] = kvMatch[2].trim();
+                }
+            }
 
-Keep the core purpose. Output markdown only, start with "You are..."`;
+            const template = templateSplit[1].trim();
+            if (template) {
+                results.push({ meta, template });
+            }
+        }
 
-        return this.execute(prompt);
+        if (results.length === 0) {
+            this.log(`    [parser] No blocks found for type=${type}. First 500 chars of output:`);
+            this.log(`    ${cleaned.substring(0, 500)}`);
+        }
+
+        return results;
     }
 }
