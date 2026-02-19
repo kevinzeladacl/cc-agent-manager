@@ -3,59 +3,17 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { ClaudeTreeProvider, ClaudeItemNode } from './providers/ClaudeTreeProvider';
 import { MetricsTreeProvider } from './providers/MetricsTreeProvider';
+import { MarkdownTreeProvider, MarkdownNode } from './providers/MarkdownTreeProvider';
+import { QuickActionsProvider } from './providers/QuickActionsProvider';
 import { MetricsDashboard } from './webview/MetricsDashboard';
-import { AutoContextService, AgentSuggestion, CommandSuggestion, SkillSuggestion } from './services/AutoContextService';
+import { ClaudeCodeService, AgentSuggestion, CommandSuggestion, SkillSuggestion } from './services/ClaudeCodeService';
 
+let quickActionsProvider: QuickActionsProvider;
+let markdownProvider: MarkdownTreeProvider;
 let agentsProvider: ClaudeTreeProvider;
 let commandsProvider: ClaudeTreeProvider;
 let skillsProvider: ClaudeTreeProvider;
 let metricsProvider: MetricsTreeProvider;
-
-/**
- * Check if user has accepted skip permissions, or ask them
- * Returns true if accepted, false if declined
- */
-async function ensureSkipPermissionsAccepted(): Promise<boolean> {
-    const config = vscode.workspace.getConfiguration('ccAgentManager');
-    const alreadyAsked = config.get<boolean>('skipPermissionPromptsAsked', false);
-    const skipEnabled = config.get<boolean>('skipPermissionPrompts', false);
-
-    // If already asked and accepted, return true
-    if (alreadyAsked && skipEnabled) {
-        return true;
-    }
-
-    // If already asked and declined, return false
-    if (alreadyAsked && !skipEnabled) {
-        return false;
-    }
-
-    // First time: show explanation dialog
-    const result = await vscode.window.showInformationMessage(
-        'Auto Context uses Claude Code to generate agent prompts. ' +
-        'For non-interactive execution, it needs to skip permission prompts. ' +
-        'This only reads project files (README.md, CLAUDE.md, etc.) to generate context.\n\n' +
-        'Allow skipping permission prompts?',
-        { modal: true },
-        'Allow',
-        'Deny'
-    );
-
-    // Save the decision
-    const accepted = result === 'Allow';
-    await config.update('skipPermissionPromptsAsked', true, vscode.ConfigurationTarget.Global);
-    await config.update('skipPermissionPrompts', accepted, vscode.ConfigurationTarget.Global);
-
-    if (!accepted) {
-        vscode.window.showWarningMessage(
-            'Auto Context will run without skip-permissions flag. ' +
-            'This may cause timeouts if Claude Code waits for interactive prompts. ' +
-            'You can change this in Settings > CC-Agent Manager.'
-        );
-    }
-
-    return accepted;
-}
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('CC-Agent Manager is now active!');
@@ -63,12 +21,16 @@ export function activate(context: vscode.ExtensionContext) {
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
     // Create tree data providers
+    quickActionsProvider = new QuickActionsProvider();
+    markdownProvider = new MarkdownTreeProvider(workspaceRoot);
     agentsProvider = new ClaudeTreeProvider(workspaceRoot, 'agent');
     commandsProvider = new ClaudeTreeProvider(workspaceRoot, 'command');
     skillsProvider = new ClaudeTreeProvider(workspaceRoot, 'skill');
     metricsProvider = new MetricsTreeProvider(workspaceRoot);
 
     // Register tree views
+    vscode.window.registerTreeDataProvider('claudeQuickActions', quickActionsProvider);
+    vscode.window.registerTreeDataProvider('claudeMarkdownFiles', markdownProvider);
     vscode.window.registerTreeDataProvider('claudeAgents', agentsProvider);
     vscode.window.registerTreeDataProvider('claudeCommands', commandsProvider);
     vscode.window.registerTreeDataProvider('claudeSkills', skillsProvider);
@@ -79,6 +41,14 @@ export function activate(context: vscode.ExtensionContext) {
 
     // Register commands
     context.subscriptions.push(
+        vscode.commands.registerCommand('claudeCodeManager.openMarkdown', (node: MarkdownNode) => {
+            openFile(node.resourcePath);
+        }),
+
+        vscode.commands.registerCommand('claudeCodeManager.refreshMarkdown', () => {
+            markdownProvider.refresh();
+        }),
+
         vscode.commands.registerCommand('claudeCodeManager.openAgent', (node: ClaudeItemNode) => {
             openFile(node.item.filePath);
         }),
@@ -108,6 +78,7 @@ export function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.commands.registerCommand('claudeCodeManager.refresh', () => {
+            markdownProvider.refresh();
             agentsProvider.refresh();
             commandsProvider.refresh();
             skillsProvider.refresh();
@@ -147,10 +118,18 @@ export function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand('claudeCodeManager.suggestSkills', async () => {
             await runSuggestSkills(workspaceRoot);
+        }),
+
+        vscode.commands.registerCommand('claudeCodeManager.autoGenerate', async () => {
+            await runAutoGenerate(workspaceRoot);
+        }),
+
+        vscode.commands.registerCommand('claudeCodeManager.updateClaudeMd', async () => {
+            await runUpdateClaudeMd(workspaceRoot);
         })
     );
 
-    // Watch for changes in .claude directories (including disabled folders and skills)
+    // Watch for changes in .claude directories
     const watcher = vscode.workspace.createFileSystemWatcher(
         '**/.claude/{agents,commands,skills,agents-disabled,commands-disabled,skills-disabled}/**/*.md'
     );
@@ -158,13 +137,198 @@ export function activate(context: vscode.ExtensionContext) {
     watcher.onDidChange(() => refreshAll());
     watcher.onDidDelete(() => refreshAll());
     context.subscriptions.push(watcher);
+
+    // Watch for markdown file changes across the workspace
+    const mdWatcher = vscode.workspace.createFileSystemWatcher('**/*.md');
+    mdWatcher.onDidCreate(() => markdownProvider.refresh());
+    mdWatcher.onDidChange(() => markdownProvider.refresh());
+    mdWatcher.onDidDelete(() => markdownProvider.refresh());
+    context.subscriptions.push(mdWatcher);
 }
 
 function refreshAll() {
+    markdownProvider.refresh();
     agentsProvider.refresh();
     commandsProvider.refresh();
     skillsProvider.refresh();
     metricsProvider.refresh();
+}
+
+async function runAutoGenerate(workspaceRoot: string | undefined) {
+    if (!workspaceRoot) {
+        vscode.window.showErrorMessage('No workspace folder open. Please open a folder first.');
+        return;
+    }
+
+    // Step 1: Confirmation
+    const confirm = await vscode.window.showWarningMessage(
+        'AutoGenerate will create Claude Code structure and use AI to suggest agents, commands, and skills. Proceed?',
+        'Yes', 'Cancel'
+    );
+    if (confirm !== 'Yes') return;
+
+    // Step 2: Model picker
+    const modelPick = await vscode.window.showQuickPick([
+        { label: '$(zap) Sonnet', description: 'Balanced speed & quality (Recommended)', value: 'sonnet' },
+        { label: '$(sparkle) Opus', description: 'Most capable, best analysis', value: 'opus' },
+        { label: '$(rocket) Haiku', description: 'Fastest and most economical', value: 'haiku' }
+    ], { placeHolder: 'Select model for AI generation' });
+
+    if (!modelPick) return;
+    const model = modelPick.value;
+
+    const claude = new ClaudeCodeService(workspaceRoot);
+
+    await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: 'AutoGenerate',
+        cancellable: false
+    }, async (progress) => {
+        // Step 3: Create dirs (no CLAUDE.md yet)
+        progress.report({ message: 'Creating Claude Code project structure...' });
+
+        const dirs = [
+            path.join(workspaceRoot, '.claude'),
+            path.join(workspaceRoot, '.claude', 'agents'),
+            path.join(workspaceRoot, '.claude', 'commands'),
+            path.join(workspaceRoot, '.claude', 'skills')
+        ];
+        for (const dir of dirs) {
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+            }
+        }
+
+        // Create settings.json if missing
+        const settingsPath = path.join(workspaceRoot, '.claude', 'settings.json');
+        if (!fs.existsSync(settingsPath)) {
+            fs.writeFileSync(settingsPath, JSON.stringify({ permissions: {} }, null, 2));
+        }
+
+        refreshAll();
+
+        // Step 4: Check Claude CLI
+        progress.report({ message: 'Checking Claude Code CLI...' });
+        const available = await claude.isAvailable();
+
+        if (!available) {
+            // Fallback: create basic CLAUDE.md template
+            const claudeMdPath = path.join(workspaceRoot, 'CLAUDE.md');
+            if (!fs.existsSync(claudeMdPath)) {
+                const projectName = path.basename(workspaceRoot);
+                const template = `# ${projectName}\n\n## Project Overview\n\nDescribe your project here.\n\n## Key Conventions\n\n- [Add your conventions]\n\n## Architecture\n\n- [Describe your architecture]\n`;
+                fs.writeFileSync(claudeMdPath, template);
+            }
+            vscode.window.showInformationMessage('Project structure created. Install Claude Code CLI to enable AI suggestions.');
+            refreshAll();
+            return;
+        }
+
+        const outputChannel = vscode.window.createOutputChannel('CC Agent Manager');
+        outputChannel.show();
+        claude.setOutputChannel(outputChannel);
+
+        // Step 5: Suggest agents, commands, skills
+        progress.report({ message: `Analyzing project for agent suggestions (${model})...` });
+        const agentSuggestions = await claude.suggestAgents(model);
+        await showAgentSuggestions(agentSuggestions, workspaceRoot);
+
+        progress.report({ message: `Analyzing project for command suggestions (${model})...` });
+        const commandSuggestions = await claude.suggestCommands(model);
+        await showCommandSuggestions(commandSuggestions, workspaceRoot);
+
+        progress.report({ message: `Analyzing project for skill suggestions (${model})...` });
+        const skillSuggestions = await claude.suggestSkills(model);
+        await showSkillSuggestions(skillSuggestions, workspaceRoot);
+
+        // Step 6: Generate CLAUDE.md with AI
+        progress.report({ message: `Generating CLAUDE.md with AI (${model})...` });
+        const claudeMdPath = path.join(workspaceRoot, 'CLAUDE.md');
+        const claudeMdExists = fs.existsSync(claudeMdPath);
+
+        let shouldGenerate = true;
+        if (claudeMdExists) {
+            const update = await vscode.window.showWarningMessage(
+                'CLAUDE.md already exists. Update it with AI-generated content?',
+                'Yes', 'No'
+            );
+            shouldGenerate = update === 'Yes';
+        }
+
+        if (shouldGenerate) {
+            const generatedMd = await claude.generateClaudeMd(model);
+            if (generatedMd) {
+                fs.writeFileSync(claudeMdPath, generatedMd);
+                openFile(claudeMdPath);
+            } else if (!claudeMdExists) {
+                // Fallback template if AI generation failed and no file exists
+                const projectName = path.basename(workspaceRoot);
+                const template = `# ${projectName}\n\n## Project Overview\n\nDescribe your project here.\n\n## Key Conventions\n\n- [Add your conventions]\n\n## Architecture\n\n- [Describe your architecture]\n`;
+                fs.writeFileSync(claudeMdPath, template);
+            }
+        }
+    });
+
+    refreshAll();
+    vscode.window.showInformationMessage('AutoGenerate complete!');
+}
+
+async function runUpdateClaudeMd(workspaceRoot: string | undefined) {
+    if (!workspaceRoot) {
+        vscode.window.showErrorMessage('No workspace folder open. Please open a folder first.');
+        return;
+    }
+
+    // Confirmation
+    const confirm = await vscode.window.showWarningMessage(
+        'This will use AI to analyze your project and generate/update CLAUDE.md. Proceed?',
+        'Yes', 'Cancel'
+    );
+    if (confirm !== 'Yes') return;
+
+    // Model picker
+    const modelPick = await vscode.window.showQuickPick([
+        { label: '$(zap) Sonnet', description: 'Balanced speed & quality (Recommended)', value: 'sonnet' },
+        { label: '$(sparkle) Opus', description: 'Most capable, best analysis', value: 'opus' },
+        { label: '$(rocket) Haiku', description: 'Fastest and most economical', value: 'haiku' }
+    ], { placeHolder: 'Select model for CLAUDE.md generation' });
+
+    if (!modelPick) return;
+    const model = modelPick.value;
+
+    const claude = new ClaudeCodeService(workspaceRoot);
+
+    await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: 'Update CLAUDE.md',
+        cancellable: false
+    }, async (progress) => {
+        progress.report({ message: 'Checking Claude Code CLI...' });
+        const available = await claude.isAvailable();
+
+        if (!available) {
+            vscode.window.showErrorMessage('Claude Code CLI not found. Please install it to use AI features.');
+            return;
+        }
+
+        const outputChannel = vscode.window.createOutputChannel('CC Agent Manager');
+        outputChannel.show();
+        claude.setOutputChannel(outputChannel);
+
+        progress.report({ message: `Generating CLAUDE.md with AI (${model})...` });
+        const generatedMd = await claude.generateClaudeMd(model);
+
+        if (generatedMd) {
+            const claudeMdPath = path.join(workspaceRoot, 'CLAUDE.md');
+            fs.writeFileSync(claudeMdPath, generatedMd);
+            openFile(claudeMdPath);
+            vscode.window.showInformationMessage('CLAUDE.md updated with AI-generated content.');
+        } else {
+            vscode.window.showErrorMessage('Failed to generate CLAUDE.md. Check Output for details.');
+        }
+    });
+
+    refreshAll();
 }
 
 function openFile(filePath: string) {
@@ -178,49 +342,41 @@ async function runAutoContext(workspaceRoot: string | undefined) {
         return;
     }
 
-    const autoContext = new AutoContextService(workspaceRoot);
+    const claude = new ClaudeCodeService(workspaceRoot);
+
+    // Show options
+    const action = await vscode.window.showQuickPick([
+        { label: '$(sync) Update All Agents', description: 'Add project context to all existing agents', value: 'update' },
+        { label: '$(lightbulb) Suggest New Agents', description: 'Analyze project and suggest new agents', value: 'suggest' },
+        { label: '$(checklist) Both', description: 'Update existing agents and suggest new ones', value: 'both' }
+    ], { placeHolder: 'What would you like to do?' });
+
+    if (!action) return;
 
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: 'Auto Context',
         cancellable: false
     }, async (progress) => {
-        // Check Claude Code availability
         progress.report({ message: 'Checking Claude Code CLI...' });
-        const claudeAvailable = await autoContext.checkClaudeAvailability();
+        const available = await claude.isAvailable();
 
-        if (!claudeAvailable) {
-            vscode.window.showWarningMessage('Claude Code CLI not found. Install it for AI-powered features. Using static analysis as fallback.');
-        }
-
-        // Scan markdown files
-        progress.report({ message: 'Scanning project files...' });
-        const files = await autoContext.scanMarkdownFiles();
-
-        if (files.length === 0) {
-            vscode.window.showWarningMessage('No markdown files found in the project.');
+        if (!available) {
+            vscode.window.showErrorMessage('Claude Code CLI not found. Please install it to use AI features.');
             return;
         }
 
-        // Show options
-        const action = await vscode.window.showQuickPick([
-            { label: '$(sync) Update All Agents', description: 'Add project context to all existing agents', value: 'update' },
-            { label: '$(lightbulb) Suggest New Agents', description: 'Analyze project and suggest new agents', value: 'suggest' },
-            { label: '$(checklist) Both', description: 'Update existing agents and suggest new ones', value: 'both' }
-        ], { placeHolder: 'What would you like to do?' });
-
-        if (!action) return;
-
         if (action.value === 'update' || action.value === 'both') {
-            progress.report({ message: claudeAvailable ? 'Claude Code is updating agents...' : 'Updating agents...' });
-            await updateAllAgentsContext(workspaceRoot, autoContext, files, claudeAvailable);
+            progress.report({ message: 'Claude Code is updating agents...' });
+            await updateAllAgentsContext(workspaceRoot, claude);
         }
 
         if (action.value === 'suggest' || action.value === 'both') {
-            progress.report({ message: claudeAvailable ? 'Claude Code is analyzing project...' : 'Analyzing project...' });
-            const suggestions = claudeAvailable
-                ? await autoContext.suggestAgentsWithAI(files)
-                : autoContext.suggestAgents(files);
+            progress.report({ message: 'Claude Code is analyzing project...' });
+            const outputChannel = vscode.window.createOutputChannel('CC Agent Manager');
+            outputChannel.show();
+            claude.setOutputChannel(outputChannel);
+            const suggestions = await claude.suggestAgents();
             await showAgentSuggestions(suggestions, workspaceRoot);
         }
     });
@@ -228,7 +384,7 @@ async function runAutoContext(workspaceRoot: string | undefined) {
     agentsProvider.refresh();
 }
 
-async function updateAllAgentsContext(workspaceRoot: string, autoContext: AutoContextService, files: ReturnType<typeof autoContext.scanMarkdownFiles> extends Promise<infer T> ? T : never, useAI: boolean) {
+async function updateAllAgentsContext(workspaceRoot: string, claude: ClaudeCodeService) {
     const agentsDir = path.join(workspaceRoot, '.claude', 'agents');
 
     if (!fs.existsSync(agentsDir)) {
@@ -243,12 +399,6 @@ async function updateAllAgentsContext(workspaceRoot: string, autoContext: AutoCo
         return;
     }
 
-    // If using AI, check/request skip permissions
-    if (useAI) {
-        const skipPermissions = await ensureSkipPermissionsAccepted();
-        autoContext.setSkipPermissions(skipPermissions);
-    }
-
     // Ask which agents to update
     const selected = await vscode.window.showQuickPick(
         agentFiles.map(f => ({ label: f.replace('.md', ''), picked: true })),
@@ -260,55 +410,30 @@ async function updateAllAgentsContext(workspaceRoot: string, autoContext: AutoCo
 
     if (!selected || selected.length === 0) return;
 
-    const results: { name: string; success: boolean; method: string; error?: string }[] = [];
-
     // Create output channel for live progress
     const outputChannel = vscode.window.createOutputChannel('CC Agent Manager');
     outputChannel.show();
     outputChannel.appendLine('=== Auto Context Update ===\n');
 
-    // Pass output channel to service for live logging
-    autoContext.setOutputChannel(outputChannel);
+    claude.setOutputChannel(outputChannel);
 
-    // Show what files will be read
-    const projectFiles = autoContext.getReadableProjectFiles();
-    outputChannel.appendLine('Reading project files:');
-    for (const file of projectFiles) {
-        outputChannel.appendLine(`  - ${file}`);
-    }
-    outputChannel.appendLine('');
+    const results: { name: string; success: boolean; method: string; error?: string }[] = [];
 
-    // Process each agent with progress updates
     for (let i = 0; i < selected.length; i++) {
         const agent = selected[i];
         const agentPath = path.join(agentsDir, `${agent.label}.md`);
         const progress = `[${i + 1}/${selected.length}]`;
 
         outputChannel.appendLine(`${progress} Updating: ${agent.label}...`);
+        outputChannel.appendLine(`    -> Sending to Claude Code...`);
 
-        if (useAI) {
-            outputChannel.appendLine(`    -> Sending to Claude Code...`);
-            const result = await autoContext.updateAgentWithContextAI(agentPath, files);
-            results.push({
-                name: agent.label,
-                success: result.success,
-                method: result.method,
-                error: result.error
-            });
+        const result = await claude.updateAgentContext(agentPath);
+        results.push({ name: agent.label, ...result });
 
-            if (result.success) {
-                outputChannel.appendLine(`    -> Done: ${result.method}`);
-            } else {
-                outputChannel.appendLine(`    -> Failed: ${result.error || 'Unknown error'}`);
-            }
+        if (result.success) {
+            outputChannel.appendLine(`    -> Done: ${result.method}`);
         } else {
-            const success = await autoContext.updateAgentWithContext(agentPath, files);
-            results.push({
-                name: agent.label,
-                success,
-                method: 'static analysis'
-            });
-            outputChannel.appendLine(`    -> Done: static analysis`);
+            outputChannel.appendLine(`    -> Failed: ${result.error || 'Unknown error'}`);
         }
         outputChannel.appendLine('');
     }
@@ -321,19 +446,15 @@ async function updateAllAgentsContext(workspaceRoot: string, autoContext: AutoCo
     outputChannel.appendLine(`Total: ${results.length} | Success: ${succeeded.length} | Failed: ${failed.length}\n`);
 
     for (const r of succeeded) {
-        outputChannel.appendLine(`[OK] ${r.name}`);
-        outputChannel.appendLine(`     Method: ${r.method}`);
+        outputChannel.appendLine(`[OK] ${r.name} (${r.method})`);
     }
     for (const r of failed) {
-        outputChannel.appendLine(`[FAILED] ${r.name}`);
-        outputChannel.appendLine(`     Error: ${r.error || 'Unknown error'}`);
+        outputChannel.appendLine(`[FAILED] ${r.name}: ${r.error || 'Unknown error'}`);
     }
 
-    // Show notification
     if (succeeded.length > 0) {
         vscode.window.showInformationMessage(`Updated ${succeeded.length} agent(s). Check Output for details.`);
     }
-
     if (failed.length > 0) {
         vscode.window.showErrorMessage(`Failed ${failed.length} agent(s). Check Output for details.`);
     }
@@ -345,37 +466,26 @@ async function updateSingleAgentContext(node: ClaudeItemNode, workspaceRoot: str
         return;
     }
 
-    const autoContext = new AutoContextService(workspaceRoot);
-
-    // Check Claude availability and permissions
-    const claudeAvailable = await autoContext.checkClaudeAvailability();
-    if (claudeAvailable) {
-        const skipPermissions = await ensureSkipPermissionsAccepted();
-        autoContext.setSkipPermissions(skipPermissions);
-    }
+    const claude = new ClaudeCodeService(workspaceRoot);
 
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: 'Updating agent context...',
         cancellable: false
     }, async () => {
-        const files = await autoContext.scanMarkdownFiles();
-
-        // Use AI if available
-        let success: boolean;
-        if (claudeAvailable) {
-            const result = await autoContext.updateAgentWithContextAI(node.item.filePath, files);
-            success = result.success;
-        } else {
-            success = await autoContext.updateAgentWithContext(node.item.filePath, files);
+        const available = await claude.isAvailable();
+        if (!available) {
+            vscode.window.showErrorMessage('Claude Code CLI not found. Please install it to use AI features.');
+            return;
         }
 
-        if (success) {
+        const result = await claude.updateAgentContext(node.item.filePath);
+
+        if (result.success) {
             vscode.window.showInformationMessage(`Updated "${node.item.name}" with project context.`);
-            // Open the file to show changes
             openFile(node.item.filePath);
         } else {
-            vscode.window.showErrorMessage(`Failed to update "${node.item.name}".`);
+            vscode.window.showErrorMessage(`Failed to update "${node.item.name}": ${result.error || 'Unknown error'}`);
         }
     });
 }
@@ -427,15 +537,11 @@ async function showAgentSuggestions(suggestions: AgentSuggestion[], workspaceRoo
         createdAgents.push(item.suggestion.name);
     }
 
-    // Show detailed result
     if (createdAgents.length > 0) {
         const agentList = createdAgents.join(', ');
         vscode.window.showInformationMessage(`Created ${createdAgents.length} agent(s): ${agentList}`);
         agentsProvider.refresh();
-
-        // Open the first created agent
-        const firstAgent = path.join(agentsDir, `${createdAgents[0]}.md`);
-        openFile(firstAgent);
+        openFile(path.join(agentsDir, `${createdAgents[0]}.md`));
     }
 
     if (skippedAgents.length > 0 && createdAgents.length === 0) {
@@ -449,7 +555,7 @@ async function runSuggestCommands(workspaceRoot: string | undefined) {
         return;
     }
 
-    const autoContext = new AutoContextService(workspaceRoot);
+    const claude = new ClaudeCodeService(workspaceRoot);
 
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
@@ -457,21 +563,18 @@ async function runSuggestCommands(workspaceRoot: string | undefined) {
         cancellable: false
     }, async (progress) => {
         progress.report({ message: 'Checking Claude Code CLI...' });
-        const claudeAvailable = await autoContext.checkClaudeAvailability();
+        const available = await claude.isAvailable();
 
-        if (claudeAvailable) {
-            const skipPermissions = await ensureSkipPermissionsAccepted();
-            autoContext.setSkipPermissions(skipPermissions);
+        if (!available) {
+            vscode.window.showErrorMessage('Claude Code CLI not found. Please install it to use AI features.');
+            return;
         }
 
-        progress.report({ message: 'Scanning project files...' });
-        const files = await autoContext.scanMarkdownFiles();
-
-        progress.report({ message: claudeAvailable ? 'Claude Code is analyzing project...' : 'Analyzing project...' });
-        const suggestions = claudeAvailable
-            ? await autoContext.suggestCommandsWithAI(files)
-            : autoContext.suggestCommands(files);
-
+        progress.report({ message: 'Claude Code is analyzing project...' });
+        const outputChannel = vscode.window.createOutputChannel('CC Agent Manager');
+        outputChannel.show();
+        claude.setOutputChannel(outputChannel);
+        const suggestions = await claude.suggestCommands();
         await showCommandSuggestions(suggestions, workspaceRoot);
     });
 
@@ -534,7 +637,7 @@ async function runSuggestSkills(workspaceRoot: string | undefined) {
         return;
     }
 
-    const autoContext = new AutoContextService(workspaceRoot);
+    const claude = new ClaudeCodeService(workspaceRoot);
 
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
@@ -542,21 +645,18 @@ async function runSuggestSkills(workspaceRoot: string | undefined) {
         cancellable: false
     }, async (progress) => {
         progress.report({ message: 'Checking Claude Code CLI...' });
-        const claudeAvailable = await autoContext.checkClaudeAvailability();
+        const available = await claude.isAvailable();
 
-        if (claudeAvailable) {
-            const skipPermissions = await ensureSkipPermissionsAccepted();
-            autoContext.setSkipPermissions(skipPermissions);
+        if (!available) {
+            vscode.window.showErrorMessage('Claude Code CLI not found. Please install it to use AI features.');
+            return;
         }
 
-        progress.report({ message: 'Scanning project files...' });
-        const files = await autoContext.scanMarkdownFiles();
-
-        progress.report({ message: claudeAvailable ? 'Claude Code is analyzing project...' : 'Analyzing project...' });
-        const suggestions = claudeAvailable
-            ? await autoContext.suggestSkillsWithAI(files)
-            : autoContext.suggestSkills(files);
-
+        progress.report({ message: 'Claude Code is analyzing project...' });
+        const outputChannel = vscode.window.createOutputChannel('CC Agent Manager');
+        outputChannel.show();
+        claude.setOutputChannel(outputChannel);
+        const suggestions = await claude.suggestSkills();
         await showSkillSuggestions(suggestions, workspaceRoot);
     });
 
@@ -619,10 +719,9 @@ async function toggleItemState(node: ClaudeItemNode, enable: boolean) {
     const item = node.item;
 
     if (item.type === 'skill') {
-        // Skills are directories - move the parent directory
-        const skillDir = path.dirname(item.filePath); // e.g., .claude/skills/my-skill
+        const skillDir = path.dirname(item.filePath);
         const skillName = path.basename(skillDir);
-        const baseDir = path.dirname(path.dirname(skillDir)); // e.g., .claude
+        const baseDir = path.dirname(path.dirname(skillDir));
         const targetFolder = enable ? 'skills' : 'skills-disabled';
         const targetDir = path.join(baseDir, targetFolder, skillName);
 
@@ -649,7 +748,6 @@ async function toggleItemState(node: ClaudeItemNode, enable: boolean) {
         return;
     }
 
-    // Agents and commands: move the file
     const currentDir = path.dirname(item.filePath);
     const fileName = path.basename(item.filePath);
     const baseDir = path.dirname(currentDir);
@@ -664,19 +762,16 @@ async function toggleItemState(node: ClaudeItemNode, enable: boolean) {
     const targetDir = path.join(baseDir, targetFolder);
     const targetPath = path.join(targetDir, fileName);
 
-    // Create target directory if it doesn't exist
     if (!fs.existsSync(targetDir)) {
         fs.mkdirSync(targetDir, { recursive: true });
     }
 
-    // Check if target file already exists
     if (fs.existsSync(targetPath)) {
         vscode.window.showErrorMessage(`A ${item.type} with this name already exists in the ${enable ? 'enabled' : 'disabled'} folder.`);
         return;
     }
 
     try {
-        // Move the file using VS Code API
         const sourceUri = vscode.Uri.file(item.filePath);
         const targetUri = vscode.Uri.file(targetPath);
         await vscode.workspace.fs.rename(sourceUri, targetUri);
@@ -690,7 +785,6 @@ async function toggleItemState(node: ClaudeItemNode, enable: boolean) {
 }
 
 async function createNewItem(type: 'agent' | 'command', workspaceRoot: string | undefined) {
-    // Ask for location
     const location = await vscode.window.showQuickPick(
         [
             { label: 'Project', description: 'Create in .claude folder of current workspace', value: 'project' },
@@ -699,35 +793,25 @@ async function createNewItem(type: 'agent' | 'command', workspaceRoot: string | 
         { placeHolder: `Where do you want to create the ${type}?` }
     );
 
-    if (!location) {
-        return;
-    }
+    if (!location) return;
 
     if (location.value === 'project' && !workspaceRoot) {
         vscode.window.showErrorMessage('No workspace folder open. Please open a folder first or choose Global location.');
         return;
     }
 
-    // Ask for name
     const name = await vscode.window.showInputBox({
         prompt: `Enter the ${type} name (without .md extension)`,
         placeHolder: type === 'agent' ? 'my-agent' : 'my-command',
         validateInput: (value) => {
-            if (!value) {
-                return 'Name is required';
-            }
-            if (!/^[a-z0-9-]+$/.test(value)) {
-                return 'Name should only contain lowercase letters, numbers, and hyphens';
-            }
+            if (!value) return 'Name is required';
+            if (!/^[a-z0-9-]+$/.test(value)) return 'Name should only contain lowercase letters, numbers, and hyphens';
             return null;
         }
     });
 
-    if (!name) {
-        return;
-    }
+    if (!name) return;
 
-    // Determine base path
     const basePath = location.value === 'global'
         ? path.join(process.env.HOME || process.env.USERPROFILE || '', '.claude')
         : path.join(workspaceRoot!, '.claude');
@@ -736,31 +820,25 @@ async function createNewItem(type: 'agent' | 'command', workspaceRoot: string | 
     const dirPath = path.join(basePath, folder);
     const filePath = path.join(dirPath, `${name}.md`);
 
-    // Create directory if it doesn't exist
     if (!fs.existsSync(dirPath)) {
         fs.mkdirSync(dirPath, { recursive: true });
     }
 
-    // Check if file already exists
     if (fs.existsSync(filePath)) {
         vscode.window.showErrorMessage(`A ${type} with this name already exists.`);
         return;
     }
 
-    // Create file with template
     const template = type === 'agent' ? getAgentTemplate(name) : getCommandTemplate(name);
     const uri = vscode.Uri.file(filePath);
     await vscode.workspace.fs.writeFile(uri, Buffer.from(template));
 
-    // Open the file
     openFile(filePath);
-
     refreshAll();
     vscode.window.showInformationMessage(`Created new ${type}: ${name}`);
 }
 
 async function createNewSkill(workspaceRoot: string | undefined) {
-    // Ask for location
     const location = await vscode.window.showQuickPick(
         [
             { label: 'Project', description: 'Create in .claude/skills of current workspace', value: 'project' },
@@ -769,35 +847,25 @@ async function createNewSkill(workspaceRoot: string | undefined) {
         { placeHolder: 'Where do you want to create the skill?' }
     );
 
-    if (!location) {
-        return;
-    }
+    if (!location) return;
 
     if (location.value === 'project' && !workspaceRoot) {
         vscode.window.showErrorMessage('No workspace folder open. Please open a folder first or choose Global location.');
         return;
     }
 
-    // Ask for name
     const name = await vscode.window.showInputBox({
         prompt: 'Enter the skill name',
         placeHolder: 'my-skill',
         validateInput: (value) => {
-            if (!value) {
-                return 'Name is required';
-            }
-            if (!/^[a-z0-9-]+$/.test(value)) {
-                return 'Name should only contain lowercase letters, numbers, and hyphens';
-            }
+            if (!value) return 'Name is required';
+            if (!/^[a-z0-9-]+$/.test(value)) return 'Name should only contain lowercase letters, numbers, and hyphens';
             return null;
         }
     });
 
-    if (!name) {
-        return;
-    }
+    if (!name) return;
 
-    // Determine base path
     const basePath = location.value === 'global'
         ? path.join(process.env.HOME || process.env.USERPROFILE || '', '.claude')
         : path.join(workspaceRoot!, '.claude');
@@ -805,23 +873,18 @@ async function createNewSkill(workspaceRoot: string | undefined) {
     const skillDir = path.join(basePath, 'skills', name);
     const filePath = path.join(skillDir, 'SKILL.md');
 
-    // Check if skill already exists
     if (fs.existsSync(skillDir)) {
         vscode.window.showErrorMessage(`A skill with this name already exists.`);
         return;
     }
 
-    // Create directory
     fs.mkdirSync(skillDir, { recursive: true });
 
-    // Create SKILL.md with template
     const template = getSkillTemplate(name);
     const uri = vscode.Uri.file(filePath);
     await vscode.workspace.fs.writeFile(uri, Buffer.from(template));
 
-    // Open the file
     openFile(filePath);
-
     refreshAll();
     vscode.window.showInformationMessage(`Created new skill: ${name}`);
 }
@@ -897,13 +960,10 @@ async function deleteItem(node: ClaudeItemNode) {
         'Delete'
     );
 
-    if (confirm !== 'Delete') {
-        return;
-    }
+    if (confirm !== 'Delete') return;
 
     try {
         if (node.item.type === 'skill') {
-            // Skills are directories - delete the parent directory
             const skillDir = path.dirname(node.item.filePath);
             const uri = vscode.Uri.file(skillDir);
             await vscode.workspace.fs.delete(uri, { recursive: true });
@@ -926,12 +986,10 @@ async function changeAgentModel(node: ClaudeItemNode) {
         { label: '$(rocket) Haiku', description: 'Fastest, best for simple tasks', value: 'haiku' }
     ];
 
-    // Read current model from file
     const content = fs.readFileSync(node.item.filePath, 'utf-8');
     const currentModelMatch = content.match(/model:\s*["']?([^"'\n]+)["']?/);
     const currentModel = currentModelMatch ? currentModelMatch[1].trim() : 'sonnet';
 
-    // Mark current model
     const items = models.map(m => ({
         ...m,
         description: m.value === currentModel ? `${m.description} (current)` : m.description
@@ -941,21 +999,17 @@ async function changeAgentModel(node: ClaudeItemNode) {
         placeHolder: `Select model for "${node.item.name}" (current: ${currentModel})`
     });
 
-    if (!selected || selected.value === currentModel) {
-        return;
-    }
+    if (!selected || selected.value === currentModel) return;
 
     try {
         let newContent: string;
 
         if (currentModelMatch) {
-            // Replace existing model
             newContent = content.replace(
                 /model:\s*["']?[^"'\n]+["']?/,
                 `model: ${selected.value}`
             );
         } else {
-            // Add model to frontmatter
             const frontmatterMatch = content.match(/^(---\n[\s\S]*?)(---)/);
             if (frontmatterMatch) {
                 newContent = content.replace(
@@ -963,7 +1017,6 @@ async function changeAgentModel(node: ClaudeItemNode) {
                     `$1model: ${selected.value}\n$2`
                 );
             } else {
-                // No frontmatter, add it
                 newContent = `---\nmodel: ${selected.value}\n---\n\n${content}`;
             }
         }
